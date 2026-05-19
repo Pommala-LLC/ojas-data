@@ -1,33 +1,33 @@
-# Ojas Data Runtime
+# Ojas Data
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
 **LLM understands the request, but policy controls execution.**
 
-Ojas Data Runtime is a governed AI-agent data access runtime. It prevents agents from freely writing SQL or directly accessing databases. Instead, agents select registered tools, and the runtime enforces authorization, use-case policy, row or path scope, sensitive-field blocking, output masking, credential isolation, safe query construction, and policy-versioned audit before any data operation executes.
+Ojas Data  is a governed AI-agent data access . It prevents agents from freely writing SQL or directly accessing databases. Instead, agents select registered tools, and the  enforces authorization, use-case policy, row or path scope, sensitive-field blocking, output masking, credential isolation, safe query construction, and policy-versioned audit before any data operation executes.
 
 
 ---
 
 ## What This Project Does
 
-Ojas Data Runtime provides a policy-controlled execution layer between AI agents and enterprise data stores.
+Ojas Data  provides a policy-controlled execution layer between AI agents and enterprise data stores.
 
 It is designed for systems where AI agents need to read or update operational data, but the model must not receive raw database access, raw credentials, unrestricted SQL, or unmasked sensitive values.
 
 ```text
 User request
   → LLM selects registered tool
-  → Runtime authorizes agent + use case
-  → Runtime builds safe SQL/document operation
-  → Runtime applies row/path scope
-  → Runtime masks protected output
-  → Runtime executes with least-privilege credential
-  → Runtime writes policy-versioned audit event
+  →  authorizes agent + use case
+  →  builds safe SQL/document operation
+  →  applies row/path scope
+  →  masks protected output
+  →  executes with least-privilege credential
+  →  writes policy-versioned audit event
 ```
 
 The LLM understands the user’s request.
 
-The runtime controls execution.
+The  controls execution.
 
 ---
 
@@ -36,11 +36,11 @@ The runtime controls execution.
 ```text
 The LLM may propose intent.
 The policy engine decides access.
-The runtime constructs the query.
+The  constructs the query.
 The database executes only governed operations.
 ```
 
-Ojas Data Runtime does **not** rely on prompt instructions or post-hoc query checking as the primary security control.
+Ojas Data  does **not** rely on prompt instructions or post-hoc query checking as the primary security control.
 
 Instead, it prevents model-generated executable SQL from being the execution path.
 
@@ -68,14 +68,14 @@ DELETE FROM students;
 DROP TABLE students;
 ```
 
-Ojas Data Runtime uses a different model:
+Ojas Data  uses a different model:
 
 ```text
 User asks question
   → LLM selects approved tool
   → tool maps to one governed use case
-  → runtime authorizes columns, rows, paths, and operation
-  → runtime builds the query safely
+  →  authorizes columns, rows, paths, and operation
+  →  builds the query safely
 ```
 
 The LLM does not write executable SQL.
@@ -108,7 +108,7 @@ The LLM does not write executable SQL.
 
 Most agent frameworks provide tool infrastructure.
 
-Ojas Data Runtime provides governance content.
+Ojas Data  provides governance content.
 
 ```text
 Frameworks provide:
@@ -117,7 +117,7 @@ Frameworks provide:
   - graph orchestration
   - agent loops
 
-Ojas Data Runtime provides:
+Ojas Data  provides:
   - authorization boundary
   - policy validation
   - safe query construction
@@ -128,7 +128,7 @@ Ojas Data Runtime provides:
 
 Framework adapters are wrappers.
 
-The runtime core is the enforcement authority.
+The  core is the enforcement authority.
 
 ---
 
@@ -160,7 +160,7 @@ Database / Document Store
 
 ## Three Registry Architecture
 
-Ojas Data Runtime is organized around three extension registries.
+Ojas Data  is organized around three extension registries.
 
 ### 1. SQL Dialect Registry
 
@@ -212,7 +212,7 @@ Document dialects use path-based governance instead of column-based governance.
 
 ## Security Model
 
-Ojas Data Runtime enforces security through multiple layers.
+Ojas Data  enforces security through multiple layers.
 
 ```text
 Layer 0:    Allowed resources
@@ -236,7 +236,7 @@ Layer 10:   Backend capability validation
 
 ## Sensitive Values Never Reach the LLM
 
-Ojas Data Runtime masks protected values before they leave the governed runtime.
+Ojas Data  masks protected values before they leave the governed .
 
 ```text
 Raw email in database:
@@ -264,7 +264,7 @@ The LLM selects:
 Tool: view_student_profile
 ```
 
-The runtime checks:
+The  checks:
 
 ```text
 Is this agent allowed to call this tool?
@@ -277,7 +277,7 @@ Which credential role should be used?
 What audit event should be recorded?
 ```
 
-The runtime may execute:
+The  may execute:
 
 ```sql
 SELECT id, name, course, email
@@ -420,7 +420,7 @@ document_policies:
 
 ---
 
-## Supported Runtime Modes
+## Supported  Modes
 
 ### Normal Mode
 
@@ -429,8 +429,8 @@ LLM/framework-native tool selection.
 ```text
 User text
   → LLM selects tool
-  → runtime authorizes
-  → runtime executes
+  →  authorizes
+  →  executes
 ```
 
 ### Keyword Mode
@@ -441,8 +441,8 @@ Deterministic keyword or synonym mapping.
 User text
   → keyword resolver
   → tool/field candidates
-  → runtime authorizes
-  → runtime executes
+  →  authorizes
+  →  executes
 ```
 
 ### Hybrid Mode
@@ -453,8 +453,8 @@ LLM proposes candidates and keyword resolver normalizes.
 User text
   → LLM proposes
   → keyword resolver normalizes
-  → runtime authorizes
-  → runtime executes
+  →  authorizes
+  →  executes
 ```
 
 All modes are non-authoritative. Policy remains the authority.
@@ -464,8 +464,8 @@ All modes are non-authoritative. Policy remains the authority.
 ## Installation
 
 ```bash
-git clone https://github.com/Pommala-LLC/ojas-data-runtime.git
-cd ojas-data-runtime
+git clone https://github.com/Pommala-LLC/ojas-data-.git
+cd ojas-data-
 
 python -m venv .venv
 source .venv/bin/activate
@@ -503,8 +503,8 @@ export AGENT_DB=sqlite
 export AGENT_ENV=development
 export DB_SQLITE_PATH=./student_ai.db
 
-python -m ojas_data_runtime.entrypoints.bootstrap_sqlite ./student_ai.db
-python -m ojas_data_runtime.entrypoints.app
+python -m ojas_data_.entrypoints.bootstrap_sqlite ./student_ai.db
+python -m ojas_data_.entrypoints.app
 ```
 
 Then open:
@@ -518,7 +518,7 @@ SQLite will be refused in production mode:
 ```bash
 export AGENT_DB=sqlite
 export AGENT_ENV=production
-python -m ojas_data_runtime.entrypoints.app
+python -m ojas_data_.entrypoints.app
 ```
 
 Expected behavior:
@@ -585,7 +585,7 @@ LangGraph node → governed tool node → core dispatcher
 
 LangGraph may orchestrate approval.
 
-The core runtime still authorizes and executes.
+The core  still authorizes and executes.
 
 ---
 
@@ -658,7 +658,7 @@ A replacement for database-level security
 A replacement for IAM or secret management
 ```
 
-It is a governed runtime that coordinates agent tools, policies, query construction, masking, credentials, and audit.
+It is a governed  that coordinates agent tools, policies, query construction, masking, credentials, and audit.
 
 ---
 
@@ -666,18 +666,18 @@ It is a governed runtime that coordinates agent tools, policies, query construct
 
 ```text
 Frameworks provide infrastructure.
-Ojas Data Runtime provides governance content.
+Ojas Data  provides governance content.
 ```
 
 Frameworks decide how agents run.
 
-Ojas Data Runtime decides what data operations are allowed.
+Ojas Data  decides what data operations are allowed.
 
 ---
 
 ## Patent / Architecture Positioning
 
-Ojas Data Runtime is positioned around an integrated governed execution chain:
+Ojas Data  is positioned around an integrated governed execution chain:
 
 ```text
 agent identity
@@ -740,8 +740,8 @@ See `LICENSE` for the full license text.
 Recommended:
 
 ```text
-Repo:        ojas-data-runtime
-Python pkg:  ojas_data_runtime
+Repo:        ojas-data-
+Python pkg:  ojas_data_
 CLI:         ojas-data
-Docs title:  Ojas Data Runtime
+Docs title:  Ojas Data 
 ```
