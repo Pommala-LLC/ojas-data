@@ -1,0 +1,738 @@
+# Ojas Data Resolver Scope Document
+
+**Version:** v0.4
+**Status:** Freeze Candidate v0.2 — pending resolution of the three deferred sections (two-tier registry, error model, approval workflow)
+**Changes from v0.3:**
+- Added §10: failure category discriminator enum with retry-eligibility flags
+- Added §11: compile-step input/output signature (boundary form, not full schema)
+- Added §12: drift-report shape
+- Added §13: disambiguation declaration syntax for case-fold collisions
+- Added §14: test corpus shape
+- Added §15: multi-entity resolved-intent structure and worked example
+- Added §16: contract sketches for the registry manifest and the extracted/resolved-intent DTOs (boundary form only; full Pydantic schemas remain a separate implementation-spec pass)
+- Renumbered the deferred sections to §17 and the appendices accordingly
+- Updated Appendix C conformance assertions to reference the closed Appendix B items
+- Appendix B now lists only the two items deliberately left as bounded sketches
+
+---
+
+## 1. Purpose and boundary
+
+In this document, **must**, **must not**, **should**, and **may** are normative when used in resolver rules. Other prose is descriptive.
+
+The Ojas Data resolver is the component that turns an extracted user intent — already produced by the LLM extraction layer — into a deterministically-resolved set of governed metadata references that the policy engine, scope injector, credential selector, and query builder can act on. It is the load-bearing component for closed-world enforcement: every column, table, alias, and scope dimension that downstream layers operate on must have passed through the resolver.
+
+The resolver owns the following responsibilities:
+
+- Mapping extracted intent fields onto registered metadata entries — tables, columns, aliases, and declared scope dimensions
+- Detecting and surfacing ambiguity as a terminal condition rather than guessing
+- Producing an immutable resolved-intent structure that downstream layers consume as authoritative
+- Refusing to resolve any reference that is not present in the compiled metadata registry
+- Emitting structured resolution failures that the audit trail and (where permitted) the extraction-retry cell can consume
+
+The resolver explicitly does not own:
+
+- LLM extraction or candidate generation (upstream)
+- Policy decisions about who may read which fields (downstream, owned by the policy engine)
+- Sensitive-field blocking, row-scope predicate injection, or credential selection (downstream, owned by governance gates)
+- Query construction, AST validation, dry-run execution, or result masking (downstream, owned by query builder and execution layers)
+- Audit ledger formatting or persistence (orthogonal, owned by audit)
+
+**Non-goals.** The resolver is not a SQL generator, not a policy engine, not a schema discovery service, not a semantic search engine, and not an LLM reasoning component. Any feature request that requires the resolver to take on one of these roles is out of scope and belongs to a different component.
+
+The resolver sits between LLM extraction and the governance gates. Its outputs are consumed by every downstream component, but it consults no downstream component during resolution. Resolution is a pure function of the extracted intent and the compiled metadata registry. This purity is what allows the closed-world guarantee to hold: there is no path by which a downstream component, an LLM retry, or an environmental side-effect can introduce a metadata reference that did not pass through the resolver.
+
+| Layer | Owns | Consumes from resolver |
+|---|---|---|
+| LLM extraction | Intent extraction, candidate generation, schema repair | — |
+| **Resolver (this document)** | **Metadata resolution, ambiguity detection, closed-world enforcement** | **—** |
+| Policy engine | Access decisions, sensitive-field rules | Resolved metadata references |
+| Scope injector | Row-scope predicate construction | Resolved scope dimensions |
+| Credential selector | Least-privilege credential mapping | Resolved entity access classes |
+| Query builder | SQL/DSL generation, AST validation | Resolved metadata + governance decisions |
+| Execution | Query execution, masking, result shape | Approved, scoped query |
+| Audit | Evidence ledger | Every resolution outcome |
+
+**Multi-entity resolution.** The resolved-intent structure is a collection of entity-level resolutions. Each entity is resolved independently using the same logic; the ordering and joining of entities is downstream work (query builder). The per-entity resolution logic described in this document applies uniformly regardless of how many entities appear in a single request. The structure and a worked example are in §15.
+
+**Compile-step ownership.** The compile step that transforms a Pydantic manifest into a frozen-dataclass compiled index is owned by the resolver's deployment pipeline. The resolver at runtime receives only the already-compiled, immutable index. The compile step does not run at request time and is not accessible via the resolver's runtime API. The compile-step signature is specified in §11.
+
+---
+
+## 2. Core invariants
+
+The resolver enforces four invariants. These are not configuration; they are architectural commitments and are not made optional by any runtime mode.
+
+**Closed-world metadata.** A reference resolves only if it exists in the compiled metadata registry. The registry is the resolver's view of the schema, not the database. A column that exists in the database but not in the registry **must** be treated identically to a column that does not exist at all. Introspection of the live database **must** be used to validate and reconcile the registry against reality, never to extend it.
+
+**Terminal ambiguity.** When an extracted reference matches more than one registry entry — by alias, canonical name, or case-fold equivalence — resolution **must not** pick one. It **must** emit an ambiguity failure. The caller's options are clarification, registry disambiguation, or abandonment. There is no silent selection, no "most likely" candidate, and no positional fallback.
+
+**Candidate exposure for ambiguity failures.** The full ambiguity candidate set **must** be recorded in the internal failure object and in the audit ledger. The LLM-facing retry feedback (when `GOVERNED_EXTRACTION_RETRY` is active) **must not** receive the candidate set, because doing so creates a metadata-leak channel: the LLM (or anyone upstream of it) learns which fields exist in the registry. User-facing clarification, when allowed by the calling layer, **must** use only registry-approved display labels or safe aliases, never physical table or column identifiers. The split — full detail to audit, sanitized form to LLM, safe labels to user — is what keeps terminal ambiguity both useful and safe.
+
+**Deterministic authority.** Given a fixed registry version and a fixed extracted intent, resolution **must** produce a fixed result. There **must not** be randomness, no LLM call, and no retrieval-augmented disambiguation inside the resolver. Two callers with the same inputs receive the same outputs.
+
+**Retry never changes authority.** The extraction-retry cell may re-ask the LLM and produce a new extracted intent. That new intent **must** be resolved from zero against the same registry. The resolver **must not** retain partial resolution state across retry attempts, **must not** relax matching rules on subsequent attempts, and **must not** learn from prior failures within a request. Authority is recomputed every time.
+
+| Invariant | What it forbids | Where it is enforced |
+|---|---|---|
+| Closed world | LLM-invented columns; introspection auto-include | Registry lookup step |
+| Terminal ambiguity | Silent candidate selection; positional fallback | Match-set evaluation step |
+| Candidate exposure | Leaking candidate identifiers to LLM or end user | Failure-object serialization boundary |
+| Deterministic authority | LLM-in-the-loop disambiguation; randomized tiebreak | Whole resolver |
+| Retry never changes authority | Cross-attempt state; relaxed rules on retry | Resolver entry point |
+
+---
+
+## 3. Runtime modes
+
+The resolver supports two runtime modes. The mode is recorded in the audit trail for every request. There are no other modes, and there will not be a Lite mode.
+
+**`STRICT_DETERMINISTIC`** is the default mode. The resolver receives an extracted intent, performs resolution against the registry, and returns either a resolved-intent structure or a structured resolution failure. The LLM is not consulted during resolution. Failures are terminal for the request unless the caller is the extraction-retry cell operating under `GOVERNED_EXTRACTION_RETRY`.
+
+**`GOVERNED_EXTRACTION_RETRY`** is the approved γ-only exception mode. It does not change resolver behavior — resolution itself remains deterministic, closed-world, and ambiguity-terminal. What it changes is the *envelope* around resolution: failures of certain categories may be returned to a bounded retry cell that re-asks the LLM with sanitized feedback. Authority-category failures remain terminal regardless of mode. Use of this mode **must** be approval-gated at agent declaration time.
+
+**Activation rule.** A caller **may** request `GOVERNED_EXTRACTION_RETRY`, but the runtime **must** honor it only if the agent or tool declaration is approved for that mode. Otherwise the request **must** be downgraded to `STRICT_DETERMINISTIC` or rejected according to runtime policy. This rule closes the path where a prompt, an LLM output, or an untrusted tool configuration could self-select retry mode.
+
+| Mode | Resolver behavior | Failure routing |
+|---|---|---|
+| `STRICT_DETERMINISTIC` | Deterministic, closed-world, ambiguity-terminal | All failures terminal |
+| `GOVERNED_EXTRACTION_RETRY` | Deterministic, closed-world, ambiguity-terminal | Extraction-category failures → retry cell; authority-category failures → terminal |
+
+---
+
+## 4. Type and contract model
+
+The resolver uses Pydantic v2 at every boundary and frozen dataclasses internally. This split is load-bearing for two reasons: Pydantic enforces validation and produces JSON Schema at the points where contracts cross trust boundaries, and frozen dataclasses give the hot path the immutability and performance the resolver needs.
+
+The Pydantic boundary covers: the registry manifest schema authors write or generate; the extracted-intent DTO produced by the LLM layer; the resolved-intent DTO consumed by downstream layers; the structured resolution-failure types emitted on every failure path; and the authoring-validation errors raised when a manifest fails compile.
+
+The frozen-dataclass internal layer covers: the compiled registry index that resolution consults at runtime; intermediate match-set representations during resolution; and the case-fold canonical-name index. None of these cross a process boundary. None of them are mutable once constructed.
+
+The compile step is the bridge between the two layers. A Pydantic-validated manifest becomes a frozen-dataclass compiled index by way of an explicit compile function. The compiled index is the resolver's runtime authority; the manifest is the authoring authority. They are not interchangeable, and the compile step is the only path from one to the other.
+
+| Surface | Form | Crosses trust boundary? |
+|---|---|---|
+| Registry manifest | Pydantic v2 BaseModel | Yes — authored by humans, validated and approved |
+| Extracted intent DTO | Pydantic v2 BaseModel | Yes — produced by LLM layer |
+| Resolved intent DTO | Pydantic v2 BaseModel | Yes — consumed by downstream layers |
+| Resolution failure | Pydantic v2 BaseModel | Yes — consumed by audit, retry, and caller |
+| Authoring validation error | Pydantic v2 BaseModel | Yes — surfaced to manifest author |
+| Compiled registry index | Frozen dataclass + immutable maps | No — resolver-internal |
+| Case-fold canonical index | Frozen dataclass | No — resolver-internal |
+| Match-set intermediate | Frozen dataclass | No — resolver-internal |
+
+The compiled index is treated as immutable for the lifetime of a registry version. Loading a new registry version produces a new compiled index; the old one is not mutated. This means concurrent resolution against a registry version is lock-free.
+
+Field-level contracts for the registry manifest, the extracted-intent DTO, and the resolved-intent DTO are sketched in §16. Full Pydantic schemas remain a separate implementation-spec pass.
+
+---
+
+## 5. Metadata authority
+
+The compiled metadata registry is the resolver's source of truth about what exists, what it is called, what aliases refer to it, and what governance attributes apply. The registry is constructed from an explicit manifest authored by registry authors and approved through the manifest-approval workflow.
+
+The manifest is the authority. Decorators, builder APIs, Pydantic class declarations on entity models, or any other authoring affordance may emit draft manifest entries for convenience, but those drafts have no runtime effect until they have been compiled into a registry version and that version has been approved. Authoring affordances are scaffolding; the manifest is the structure.
+
+### Authoring-to-runtime lifecycle
+
+```
+  Manifest (Pydantic v2)
+        │
+        ▼
+  Pydantic validation
+        │
+        ▼
+  Introspection reconciliation
+   (live DB ←→ manifest, drift surfaced)
+        │
+        ▼
+  Compile
+   (Pydantic → frozen-dataclass compiled index)
+        │
+        ▼
+  Approval
+   (manifest-approval workflow gates the version)
+        │
+        ▼
+  Immutable compiled index
+        │
+        ▼
+  Runtime resolution
+   (pure function of intent + compiled index)
+```
+
+The diagram is the spec. A registry version that has not passed every stage above **must not** be reachable by runtime resolution.
+
+### Introspection role
+
+Database introspection plays a specific and narrow role. It is run against the live database at registry compile time and at scheduled intervals afterward. Its job is to confirm that everything the manifest declares actually exists in the database with compatible types, and to surface drift. Introspection findings **must** be reported to the registry author. They **must not** silently extend the registry. A column that exists in the database but not in the manifest **must** be reported as drift and treated by the resolver as if it did not exist. The drift-report shape is specified in §12.
+
+| Source | Authority | Resolver behavior |
+|---|---|---|
+| Manifest entry | Yes, after compile and approval | Resolves; available for matching |
+| Database column not in manifest | No | Treated as nonexistent; reported as drift |
+| Manifest entry not in database | No (broken) | Compile-time error; registry version does not pass approval |
+| Introspection-only discovery | No | Logged as drift; never resolves |
+| Runtime LLM suggestion | No | Closed-world refusal |
+
+---
+
+## 6. Scope enforcement
+
+Scope dimensions — the dimensions that carry tenant identifiers, organization identifiers, region identifiers, or other dimensions that scope what rows a query may return — are declared in the metadata registry at the entity/table access-policy level. Scope is a property of the table, not a property of any individual column on it, and it is a property of the registry, not a property of any tool or use case that consults the registry.
+
+A registry entry for a table declares which scope dimensions apply to it. Each dimension names the column on that table that carries the dimension value at runtime. The mapping from dimension name (e.g., `tenant_id`) to column (e.g., `customer_tenant`) is registry-owned. Tools and use cases may declare which scope dimensions they require, but they declare the dimension, not the column. The resolver consults the registry to determine which column on each resolved entity carries each declared dimension.
+
+Field-level refinement is permitted as a special case but does not override the entity-level rule. A registry author may, on a specific column, indicate that the column itself participates in a scope dimension. The refinement points back to the entity-level dimension declaration; it does not introduce a new dimension or a new authority.
+
+The resolver's output to the scope injector is a deterministic mapping from each resolved entity to the set of scope dimensions that apply to it and the columns that carry them. The scope injector is responsible for constructing the actual predicates; the resolver is responsible for telling it which columns to inject against.
+
+**Terminology note.** "Scope dimensions" refer to the named dimensions declared at the entity level. "Scope columns" refer to the physical columns that implement those dimensions. Use cases declare required dimensions, not column names. The column-to-dimension mapping is never exposed to the LLM or the tool author.
+
+### Worked example — scope dimensions at entity level
+
+```
+entity: customer
+  columns: id, name, email, tenant_id, region
+  scope_dimensions:
+    tenant: tenant_id
+    region: region
+
+entity: customer_order
+  columns: id, customer_id, total, tenant_ref, ord_region
+  scope_dimensions:
+    tenant: tenant_ref
+    region: ord_region
+```
+
+A use case declares it requires `tenant` and `region` scope. The LLM extracts an intent to "show recent orders for active customers." The resolver maps this to the `customer` and `customer_order` entities and emits the following to the scope injector:
+
+```
+resolved_scope:
+  customer:
+    tenant -> tenant_id
+    region -> region
+  customer_order:
+    tenant -> tenant_ref
+    region -> ord_region
+```
+
+The LLM has not seen `tenant_id`, `tenant_ref`, `region`, or `ord_region`. The tool author has not picked them. The use case declared the dimensions. The registry declared the columns. The resolver produced the mapping.
+
+### Worked example — what scope enforcement is not
+
+If a use case declared `scope_columns = ["tenant_id"]` directly, the resolver **must** refuse the declaration. Column selection is registry authority, not use-case authority. The use case must declare what it needs at the dimension level.
+
+---
+
+## 7. Stage 1 matching
+
+Stage 1 of resolution is the alias-and-canonical-name match. It is the only stage at which natural-language vocabulary from the LLM meets the registry. Subsequent stages operate on resolved canonical entities.
+
+Stage 1 matching **must** be case-insensitive. The case-fold operation **must** be Unicode case-folding — specifically, NFKC normalization followed by `casefold()` — not ASCII `lower()`. This matters for non-English schemas and for any future internationalization: Turkish dotted `İ`, German `ß`, ligatures, and combining marks all need to match consistently. ASCII `lower()` would silently mishandle these.
+
+Aliases and canonical names are folded at compile time, not at match time. The compiled registry index carries a case-fold index that maps each folded form to its canonical entry. Match-time lookup is a single map access against the folded query term.
+
+Physical database identifiers **must not** be case-folded. They are preserved exactly as declared in the manifest and used verbatim in generated SQL or DSL.
+
+Case-fold collisions **must** be compile-time errors. The compile error names the colliding entries and the folded form. The registry author resolves the collision either by removing one alias, by scoping the aliases to different entities, or by declaring an explicit disambiguation as specified in §13.
+
+### Worked example — case-insensitive match, case-preserved execution
+
+```
+entity: customer
+  physical_name: "Customer"
+  canonical: customer
+  aliases: ["customers", "client", "clients"]
+  columns:
+    - canonical: full_name
+      physical_name: "FullName"
+      aliases: ["name", "customer name", "client name"]
+```
+
+An LLM extracts the intent term `Customer Name`. The resolver folds it to `customer name`, looks up the folded form in the case-fold index, and returns the resolved reference: entity `customer`, column `full_name`. The query builder later receives the resolved reference and generates SQL using the physical identifiers: `SELECT "Customer"."FullName" FROM "Customer"`.
+
+### Worked example — collision detected at compile
+
+```
+entity: account
+  columns:
+    - canonical: account_number
+      aliases: ["acct no", "account #"]
+    - canonical: acct_no
+      aliases: ["acct no"]
+```
+
+The alias `acct no` appears on two different columns of the same entity. Both fold to the same form. The manifest fails compile with:
+
+```
+CASE_FOLD_COLLISION:
+  folded_form: "acct no"
+  entries:
+    - account.account_number (alias "acct no")
+    - account.acct_no (alias "acct no")
+  resolution: remove one alias, scope to different entities, or declare explicit disambiguation
+```
+
+---
+
+## 8. Retry boundary
+
+The resolver does not retry. The extraction layer does. The retry boundary is γ-only: the LLM **may** be re-asked to repair its extraction, but no retry attempt **may** change the resolver's authority decision. Every retry attempt produces a new extracted intent that is resolved from zero against the same registry.
+
+### Failure classification by source layer
+
+Failures during a `GOVERNED_EXTRACTION_RETRY` request originate from three different layers. The retry-routing decision depends on the source.
+
+| Source layer | Example failures | Retry status |
+|---|---|---|
+| Extraction / DTO layer | Malformed intent DTO, missing required intent field, invalid enum value, malformed or under-specified extraction that has not yet reached the resolver | Retry-eligible |
+| Resolver | Unknown table or column, terminal ambiguity (multiple registry candidates), unresolved alias, case-fold disambiguation required | Terminal |
+| Governance gates (downstream of resolver) | Policy denial, sensitive-field block, scope-dimension missing, credential class mismatch, row-scope failure | Terminal |
+
+Once a term has reached resolver matching and produced multiple registry candidates, it is **resolver ambiguity** and **must** be treated as terminal. Pre-resolution extraction repair is a different category and is the only category in which retry is allowed to affect the authority decision (by producing a different extracted intent on re-ask).
+
+The boundary between source layers **must** be enforced in code, not by convention. The exhaustive failure enum is in §10.
+
+### Sanitized retry feedback
+
+When an extraction-repairable failure is routed to the retry cell, the feedback message that reaches the LLM **must** contain only the category label and the allowed alternatives — never the denied field name, never the denied value, never the reason for denial, never the missing row-scope predicate, never a credential-class hint, and never a database engine error. The retry cell constructs the LLM-facing message from a fixed template that takes only the category and the allowed-set as inputs. The full failure record, with all detail, goes to the audit ledger; the LLM sees only what the template emits.
+
+For example, when an extracted enum value falls outside the allowed set, the retry cell may emit `"Invalid enum value. Allowed values: [VIEW_PROFILE, LIST_RECORDS, GET_STATUS]"`. It **must not** emit the LLM's invalid value back to the LLM.
+
+**Footnote on alias sensitivity.** Registry authors should avoid using raw database column names as aliases when those names are themselves sensitive (e.g., a column named `ssn` with alias `ssn`). Best practice is to use business-friendly aliases ("tax identifier").
+
+### Runtime caps outside retry count
+
+The retry cell **must** operate inside an envelope that enforces, independently of retry count: a maximum wall-clock duration per request; a maximum LLM token budget per request; a maximum tool-call count per request; no-progress detection; and circuit-breaker behavior on shared dependencies.
+
+A request that exhausts wall-clock, tokens, or tool-call budget **must** terminate regardless of how many retries it has left. A no-progress signal **must** terminate regardless of budget.
+
+### No-progress detection
+
+"No-progress" is defined as two consecutive retry attempts that produce the same resolution-failure signature, where the signature is the tuple `(failure_category, failed_field_term)` for field-level failures, and the tuple `(failure_category, entity_name)` for entity-level failures.
+
+### Audit
+
+Every retry attempt **must** be logged with attempt number, the resolution-failure category that triggered the retry, the sanitized feedback emitted to the LLM, and the cap state.
+
+---
+
+## 9. *(Section number reserved.)*
+
+The deferred-architectural-sections content has moved to §17 in v0.4 to keep the closed Appendix B items (§10–§16) immediately adjacent to the body of the document. See §17.
+
+---
+
+## 10. Failure category discriminator
+
+Every failure object emitted by the extraction layer, the resolver, or a downstream governance gate **must** carry a `failure_category` discriminator from the closed enumeration below. The enumeration is exhaustive for v0.4; adding a new value is a versioned change to this document and to the failure-object schema.
+
+The `source_layer` column names which component produces the failure. The `retry_eligible` column is the routing rule for `GOVERNED_EXTRACTION_RETRY` and is enforced in code at the boundary of the extraction-retry cell.
+
+| Category code | Source layer | Description | Retry-eligible |
+|---|---|---|---|
+| `EXTRACTION_DTO_MALFORMED` | Extraction/DTO | Intent DTO failed Pydantic validation | Yes |
+| `EXTRACTION_FIELD_MISSING` | Extraction/DTO | A required intent field is absent | Yes |
+| `EXTRACTION_ENUM_INVALID` | Extraction/DTO | An enum-typed intent field has a value outside the allowed set | Yes |
+| `EXTRACTION_UNDERSPECIFIED` | Extraction/DTO | The extraction is internally inconsistent or under-specified in a way a re-phrasing could fix | Yes |
+| `RESOLVER_UNKNOWN_ENTITY` | Resolver | A term resolves to no registry entity | No |
+| `RESOLVER_UNKNOWN_COLUMN` | Resolver | A term resolves to no registry column on a known entity | No |
+| `RESOLVER_AMBIGUOUS` | Resolver | A term resolves to more than one registry candidate | No |
+| `RESOLVER_ALIAS_UNRESOLVED` | Resolver | An alias was provided but does not appear in the case-fold index | No |
+| `RESOLVER_DISAMBIGUATION_REQUIRED` | Resolver | A case-fold collision exists at runtime that the registry has not disambiguated | No |
+| `GOVERNANCE_POLICY_DENIED` | Governance | The policy engine denied the request | No |
+| `GOVERNANCE_SENSITIVE_FIELD_BLOCKED` | Governance | A sensitive-field block applies | No |
+| `GOVERNANCE_SCOPE_MISSING` | Governance | A required scope dimension has no value at request time | No |
+| `GOVERNANCE_CREDENTIAL_MISMATCH` | Governance | No credential class satisfies the resolved access requirements | No |
+| `GOVERNANCE_ROW_SCOPE_FAILED` | Governance | Row-scope predicate construction failed | No |
+
+The retry cell **must** consume only failures with `retry_eligible: Yes`. Any failure with `retry_eligible: No` **must** be propagated terminally to the caller and to the audit ledger, regardless of runtime mode.
+
+**Sanitized feedback rule per category.** The retry-cell template **must** emit the category code and, where applicable, the allowed-set. It **must not** emit the field name, the denied value, the registry candidates, or any reason text. The complete failure record — with field names, values, candidate sets, and reasons — goes to the audit ledger and is not visible to the LLM.
+
+---
+
+## 11. Compile-step signature
+
+The compile step is the boundary between the Pydantic manifest and the frozen-dataclass compiled index. It is a pure function in the contract sense: given the same manifest and the same introspection snapshot, it **must** produce the same compiled index or the same compile-error set. It is owned by the deployment pipeline, not by the runtime resolver.
+
+### Signature
+
+```
+compile(
+    manifest: RegistryManifest,
+    introspection: IntrospectionSnapshot,
+    options: CompileOptions
+) -> CompileResult
+```
+
+**Inputs.**
+
+- `manifest: RegistryManifest` — the Pydantic-validated manifest as authored. v0.4 specifies the manifest's field inventory in §16; the full Pydantic schema is a separate implementation-spec pass.
+- `introspection: IntrospectionSnapshot` — a captured snapshot of the live database schema at the time of compile. Treated as data, not as a live connection. The compile step does not query the database itself; it consumes a snapshot produced by the introspection step.
+- `options: CompileOptions` — a small bundle of compile flags. v0.4 names two: `strict_drift` (default true; drift is treated as compile error rather than warning) and `disambiguation_required` (default true; case-fold collisions must be disambiguated explicitly, not silently broken).
+
+**Output.**
+
+- `CompileResult` is one of two shapes, discriminated by `status`:
+  - `status: COMPILED` — carries a `CompiledRegistryIndex` (frozen dataclass + immutable maps; the resolver's runtime authority) and a `DriftReport` (see §12).
+  - `status: COMPILE_FAILED` — carries an ordered list of `CompileError` objects and a `DriftReport`. No compiled index is produced.
+
+**Properties.**
+
+- The compile step **must** be deterministic: same manifest + same introspection snapshot + same options → same `CompileResult`.
+- The compile step **must not** mutate its inputs.
+- The compile step **must not** have side effects observable outside its return value, with the single exception of structured logging.
+- A `CompiledRegistryIndex` once produced **must** be immutable for its lifetime. Loading a new registry version produces a new index; the old one is not modified.
+
+**Failure modes** the compile step emits:
+
+| Compile error | Trigger |
+|---|---|
+| `MANIFEST_VALIDATION_FAILED` | Pydantic validation of the manifest itself failed |
+| `MANIFEST_DB_REFERENCE_BROKEN` | The manifest references an entity or column not present in the introspection snapshot |
+| `CASE_FOLD_COLLISION` | Two manifest entries fold to the same canonical form with no explicit disambiguation |
+| `SCOPE_DIMENSION_UNREACHABLE` | A declared scope dimension points to a column not present on the entity |
+| `DRIFT_STRICT_VIOLATION` | `strict_drift=true` and the drift report contains any non-empty section |
+
+---
+
+## 12. Drift-report shape
+
+The drift report is produced by the compile step (§11) on every invocation, regardless of whether the compile succeeded. It is the canonical record of how the manifest and the live database differ. It is consumed by registry authors, by the manifest-approval workflow, and by the audit ledger.
+
+### Structure
+
+```
+DriftReport:
+  snapshot_id: str            # identity of the introspection snapshot consumed
+  snapshot_taken_at: datetime # when the snapshot was captured
+  manifest_version: str       # identity of the manifest evaluated
+  sections:
+    missing_from_db: list[ManifestRef]
+    missing_from_manifest: list[DbRef]
+    type_mismatches: list[TypeMismatch]
+    constraint_changes: list[ConstraintChange]
+    nullable_changes: list[NullableChange]
+```
+
+Each section is independently populated. An empty section means no drift of that kind. A non-empty section under `strict_drift=true` is a compile error; under `strict_drift=false` it is a warning surfaced to the registry author.
+
+**`missing_from_db`** lists manifest entries (entities or columns) that the introspection snapshot does not contain. These are broken references; the manifest cannot compile against this snapshot.
+
+**`missing_from_manifest`** lists database entities or columns that exist in the snapshot but have no manifest entry. The resolver treats these as nonexistent regardless of compile mode. The list is surfaced so the registry author can decide whether to add the entries to the manifest or leave them out deliberately.
+
+**`type_mismatches`** lists manifest entries whose declared type does not match the snapshot's type for the same identifier. Each entry names the manifest type, the snapshot type, and the identifier.
+
+**`constraint_changes`** lists differences in primary-key, foreign-key, unique, or check constraints between manifest and snapshot.
+
+**`nullable_changes`** lists columns whose nullability differs between manifest and snapshot.
+
+### Authority
+
+The drift report is informational, never authoritative. It **must not** be consulted by the resolver at request time. The compile step is the only consumer of the drift report; the resolver consumes only the compiled index.
+
+---
+
+## 13. Disambiguation declaration syntax
+
+When two manifest entries case-fold to the same canonical form (§7), the manifest **must** declare an explicit disambiguation or the compile fails (§11). The disambiguation is registry-owned and is recorded in the compiled index.
+
+### Declaration form
+
+Disambiguation is declared on the colliding entries themselves. Each entry that participates in a collision **must** declare a `disambiguator` field whose value distinguishes it from its collision peers. The `disambiguator` value is opaque to the resolver — it is used only as a tiebreaker key — but it **must** be unique within the collision group.
+
+```
+entity: customer
+  columns:
+    - canonical: account_number
+      aliases: ["acct no"]
+      disambiguator: "long_form"
+    - canonical: acct_no
+      aliases: ["acct no"]
+      disambiguator: "short_form"
+```
+
+With both entries declaring distinct disambiguators, the manifest compiles. The case-fold index records the folded form `"acct no"` as ambiguous-but-disambiguated; resolution of the term `"acct no"` from an extracted intent **must** then require the intent to carry the disambiguator value.
+
+### Intent-side reference
+
+When a registry term is disambiguated, the extracted-intent DTO **must** carry the disambiguator alongside the term:
+
+```
+extracted_intent:
+  field:
+    term: "acct no"
+    disambiguator: "long_form"
+```
+
+The resolver matches the folded term *and* the disambiguator. If the disambiguator is absent or does not match any peer in the collision group, the resolution failure is `RESOLVER_DISAMBIGUATION_REQUIRED` (§10), which is terminal.
+
+### Why the disambiguator is opaque
+
+The disambiguator is not a display label, not an alias, and not user-facing. It is a registry-internal tag. Making it opaque prevents authoring affordances (decorators, builders) from accidentally surfacing it to the LLM. The LLM does not select the disambiguator; the calling layer does, on the basis of context the resolver does not own. Typical sources are tool configuration, use-case declaration, or the agent manifest.
+
+### Scoping
+
+Disambiguators **must** be unique within a collision group, not globally. Two unrelated entities may both use `"short_form"` as a disambiguator for unrelated case-fold collisions. The compile step verifies uniqueness per group, not across the manifest.
+
+---
+
+## 14. Test corpus shape
+
+A v0.1 resolver implementation is conformant only if it passes a corpus that exercises every invariant from §2, every failure category from §10, every runtime mode from §3, and the case-fold and scope behaviors from §6 and §7. The corpus is not specified at the fixture level in v0.4 — that belongs to the implementation-spec pass — but the corpus *shape* is.
+
+### Corpus organization
+
+The corpus **must** be partitioned into five suites, each with its own pass/fail criteria:
+
+| Suite | Purpose | Pass criterion |
+|---|---|---|
+| `closed_world` | Verifies the closed-world invariant | Every reference outside the registry produces a terminal failure of the correct category; no silent extension |
+| `terminal_ambiguity` | Verifies the terminal-ambiguity invariant | Every multi-candidate match produces `RESOLVER_AMBIGUOUS`; no silent selection |
+| `case_fold_edges` | Verifies Stage 1 matching against Unicode edge cases | Every fixture's expected fold result matches the resolver's actual fold; collisions trigger compile errors |
+| `scope_mapping` | Verifies entity-level scope-dimension mapping | Every fixture's expected `resolved_scope` matches the resolver's output exactly |
+| `retry_routing` | Verifies the source-layer-based retry routing | Every fixture's expected `retry_eligible` value matches the resolver's actual routing decision under `GOVERNED_EXTRACTION_RETRY` |
+
+### Fixture form
+
+Every fixture **must** carry:
+
+- A registry manifest (or a reference to a shared one)
+- An extracted-intent DTO
+- The runtime mode under test
+- The expected outcome: either a resolved-intent DTO or a typed failure with its category code
+
+### Determinism check
+
+The corpus **must** include a determinism suite that runs every other suite twice with identical inputs and asserts byte-identical outputs. This suite is the conformance check for the deterministic-authority invariant (§2). A resolver implementation that produces different outputs on a re-run is non-conformant regardless of how many other suites it passes.
+
+### Coverage requirement
+
+Every category code in §10 **must** appear in at least one fixture as an expected outcome. Every compile-error code in §11 **must** appear in at least one compile-error fixture. Every drift section in §12 **must** appear non-empty in at least one drift fixture.
+
+---
+
+## 15. Multi-entity resolved-intent structure
+
+A single extracted intent often spans more than one entity — for example, a query that touches `customer` and `customer_order` together. The resolved-intent DTO **must** represent multi-entity resolution as a collection of independent per-entity resolutions, not as a single flat structure.
+
+### Structure
+
+```
+ResolvedIntent:
+  intent_id: str
+  registry_version: str
+  mode: RuntimeMode
+  entities: list[ResolvedEntity]
+
+ResolvedEntity:
+  entity_canonical: str         # canonical name from the registry
+  entity_physical: str          # physical name from the manifest, preserved verbatim
+  fields: list[ResolvedField]
+  scope: dict[DimensionName, PhysicalColumnName]
+
+ResolvedField:
+  field_canonical: str
+  field_physical: str           # preserved verbatim
+  role: FieldRole               # PROJECT | FILTER | GROUP | ORDER | etc.
+```
+
+The order of `entities` in the list reflects the order of mention in the extracted intent. It is preserved as metadata for downstream layers but **must not** be interpreted by the resolver as a join order or precedence. Join ordering is the query builder's responsibility.
+
+### Per-entity independence
+
+Each `ResolvedEntity` is the output of an independent application of the resolver's per-entity logic against the same compiled registry. The resolver **must not** allow cross-entity dependencies to affect the resolution of any single entity. If one entity fails to resolve, the resolver emits a typed failure naming that entity; it **must not** partially resolve other entities and emit a mixed result.
+
+### Worked example
+
+A user asks: *"Show recent orders and the email of the customer who placed each one."*
+
+The extracted intent references two entities (`customer_order`, `customer`) and three fields (`customer_order.created_at`, `customer.email`, and implicitly the join key `customer.id` / `customer_order.customer_id`).
+
+The resolved intent is:
+
+```
+ResolvedIntent:
+  intent_id: "intent-001"
+  registry_version: "registry-v17"
+  mode: STRICT_DETERMINISTIC
+  entities:
+    - ResolvedEntity:
+        entity_canonical: "customer_order"
+        entity_physical: "CustomerOrder"
+        fields:
+          - field_canonical: "created_at"
+            field_physical: "CreatedAt"
+            role: ORDER
+          - field_canonical: "customer_id"
+            field_physical: "CustomerId"
+            role: JOIN_KEY
+        scope:
+          tenant: "tenant_ref"
+          region: "ord_region"
+    - ResolvedEntity:
+        entity_canonical: "customer"
+        entity_physical: "Customer"
+        fields:
+          - field_canonical: "email"
+            field_physical: "Email"
+            role: PROJECT
+          - field_canonical: "id"
+            field_physical: "Id"
+            role: JOIN_KEY
+        scope:
+          tenant: "tenant_id"
+          region: "region"
+```
+
+The resolver has emitted two independent `ResolvedEntity` objects. Each has its own scope mapping. The query builder downstream constructs the actual join, projection, and scope predicates from this structure. The LLM has not seen any physical identifier; the scope columns are registry-owned per entity.
+
+### Failure under multi-entity intent
+
+If the LLM extracts a field that exists on one entity but not the other (e.g., a column `internal_notes` on `customer_order` that does not exist on `customer`), the failure is per-entity. The resolver emits `RESOLVER_UNKNOWN_COLUMN` naming the entity it attempted resolution against. There is no fallback to the other entity, no "best match" across entities, and no partial resolution returned alongside the failure.
+
+---
+
+## 16. Contract sketches — registry manifest and intent DTOs
+
+This section names the field inventory of the three boundary contracts. It is the minimum sufficient to make the resolver's authority surface visible; it is not the full Pydantic schema. Concrete schemas with validators, computed fields, JSON Schema generation, and serialization aliases are a separate implementation-spec pass.
+
+### Registry manifest — field inventory
+
+```
+RegistryManifest:
+  version: str
+  entities: list[ManifestEntity]
+  shared_aliases: list[SharedAlias]            # optional; aliases that span entities
+  scope_dimension_catalog: list[DimensionSpec] # canonical names for declared dimensions
+
+ManifestEntity:
+  canonical: str
+  physical_name: str
+  aliases: list[str]
+  columns: list[ManifestColumn]
+  scope_dimensions: dict[DimensionName, PhysicalColumnName]
+  access_class: str                             # consumed by credential selector
+  disambiguator: str | None                     # required if in a collision group
+
+ManifestColumn:
+  canonical: str
+  physical_name: str
+  type: ColumnType
+  nullable: bool
+  aliases: list[str]
+  sensitive: bool                               # consumed by governance gates
+  participates_in_dimension: DimensionName | None  # field-level scope refinement
+  disambiguator: str | None
+```
+
+**What is sketched, not specified.** Validator functions, computed fields, deserialization rules, default values, and the precise enumeration of `ColumnType` are not in v0.4. The above is the field inventory; the implementation-spec pass specifies the types and validators.
+
+### Extracted-intent DTO — field inventory
+
+```
+ExtractedIntent:
+  intent_id: str
+  source_query: str                             # the user's natural-language input
+  requested_mode: RuntimeMode                   # subject to §3 activation rule
+  entities: list[ExtractedEntityRef]
+  fields: list[ExtractedFieldRef]
+
+ExtractedEntityRef:
+  term: str                                     # natural-language reference
+  disambiguator: str | None                     # required if registry term is disambiguated
+
+ExtractedFieldRef:
+  entity_term: str                              # which entity this field belongs to
+  field_term: str
+  role: FieldRole
+  disambiguator: str | None
+```
+
+**What is sketched, not specified.** The LLM extraction layer's full prompt contract, the relationship between `source_query` and the extracted fields, and the validation rules on `term` strings (length, character set, normalization) are not in v0.4.
+
+### Resolved-intent DTO — field inventory
+
+The resolved-intent DTO is already specified at structural level in §15. The field-level types defer to the implementation-spec pass.
+
+### Boundary discipline
+
+All three contracts are Pydantic v2 BaseModels at the boundary. The compiled-registry-index form, which the resolver consults at runtime, is a frozen-dataclass form derived from the manifest by the compile step (§11). The two are not interchangeable; the compile step is the only bridge.
+
+---
+
+## 17. Deferred sections
+
+Three design areas remain out of scope for v0.4 and have their own design passes ahead.
+
+**Two-tier registry — Platform and Tenant.** v0.4 treats the registry as a single compiled artifact. A future revision will split authority into a platform-owned base layer and tenant-owned override or extension entries, with explicit precedence and inheritance rules. The two-tier design needs the resolver scope to be stable first because the precedence rules are defined relative to the resolver's authority surface.
+
+**Error model — raise versus return.** v0.4 specifies that the resolver emits typed Pydantic resolution-failure objects (§10). It does not yet specify, layer by layer, where these are raised as exceptions versus returned as values. The error-model pass will reconcile this against the retry boundary (extraction-repairable failures must be returnable, not raised), the audit ledger (every failure must be capturable regardless of raise/return), and API ergonomics (callers should not need a try/except for every resolution attempt).
+
+**Approval workflow for `GOVERNED_EXTRACTION_RETRY`.** v0.4 establishes that this mode is approval-gated at agent declaration time and that the runtime must downgrade or reject unapproved requests. It does not specify the approval workflow shape: who approves, what the approval artifact looks like, how it is bound to the agent manifest, how it is revoked, or how it interacts with the agent lifecycle. This is the largest of the three deferred items and will need to compose with the broader Ojas governance approval workflow.
+
+---
+
+## Appendix A — Resolver frozen principles (v0.4)
+
+1. The resolver is a pure function of extracted intent and compiled registry.
+2. Closed-world: no resolution outside the registry. Ever.
+3. Terminal ambiguity: candidate sets greater than one fail; they do not collapse.
+4. Candidate exposure splits three ways: full detail to audit, sanitized form to LLM, safe labels to user. Physical identifiers never reach the LLM or the user.
+5. Deterministic authority: same inputs, same outputs, no LLM in the loop.
+6. Retry never changes authority: every retry attempt is a fresh resolution.
+7. `STRICT_DETERMINISTIC` is the default mode. `GOVERNED_EXTRACTION_RETRY` is the only approved exception, and the runtime must downgrade or reject unapproved requests for it.
+8. Pydantic v2 at every boundary; frozen dataclasses internally; compile is the only bridge.
+9. The manifest is the authoring authority; the compiled index is the runtime authority. The lifecycle is manifest → validation → introspection reconciliation → compile → approval → immutable index → runtime.
+10. Database introspection validates and surfaces drift; it never extends the registry.
+11. Scope dimensions are registered at the entity level. Use cases declare dimensions, not column names. The column-to-dimension mapping is never exposed to the LLM or the tool author.
+12. Stage 1 matching is Unicode case-fold (NFKC + `casefold`); physical identifiers are preserved verbatim; collisions are compile-time errors and require explicit disambiguators.
+13. Retry feedback is sanitized; runtime caps live outside retry count; every retry attempt is audited.
+14. Resolver failures, governance-gate failures, and extraction-repairable failures originate from three different source layers and are routed by source layer, not by symptom.
+15. The failure-category enumeration in §10 is closed; adding a new value is a versioned change to this document and to the failure-object schema.
+16. The compile step is a pure function in the contract sense, owned by the deployment pipeline; same manifest + same introspection snapshot + same options must produce the same compiled index.
+17. Disambiguators are registry-internal, opaque to the resolver, and never user-facing or LLM-facing.
+18. Multi-entity resolution is per-entity-independent; the resolver must not allow cross-entity dependencies to affect single-entity resolution.
+
+## Appendix B — Bounded sketches deferred to the implementation-spec pass
+
+These two items are sketched at field-inventory level in §16 but deferred for full Pydantic schemas:
+
+- Pydantic registry manifest schema (full validator and computed-field specification)
+- Extracted-intent DTO and resolved-intent DTO schemas (full type, validator, and serialization specification)
+
+The implementation-spec pass will produce the concrete Pydantic classes consistent with the field inventories in §16.
+
+## Appendix C — Conformance assertions for v0.1
+
+The assertions below are the minimum behavioral conformance set for the resolver. A v0.1 implementation that passes all of these has demonstrated the invariants in §2 are enforced in code, not just in prose. Each assertion is keyed to the section that specifies the behavior.
+
+| # | Assertion | Spec ref | Expected result |
+|---|---|---|---|
+| 1 | DB column exists but manifest omits it | §5, §12 | Does not resolve; reported as `missing_from_manifest` drift |
+| 2 | Manifest entry has no matching DB column | §11 | `MANIFEST_DB_REFERENCE_BROKEN` at compile time |
+| 3 | Alias maps to two columns in the same entity without explicit disambiguation | §7, §13 | `CASE_FOLD_COLLISION` at compile time |
+| 4 | Two columns differ only in case without disambiguation | §7, §13 | `CASE_FOLD_COLLISION` at compile time |
+| 5 | Same input + same registry version, run twice | §2, §14 | Byte-identical output (determinism suite) |
+| 6 | Resolver-layer failure under `STRICT_DETERMINISTIC` | §3, §8 | Terminal; no LLM retry |
+| 7 | Resolver-layer failure under `GOVERNED_EXTRACTION_RETRY` | §8, §10 | Terminal; LLM not invoked for retry |
+| 8 | `EXTRACTION_*` failure under `GOVERNED_EXTRACTION_RETRY` | §8, §10 | Retry-eligible; sanitized feedback emitted |
+| 9 | `GOVERNANCE_*` failure under `GOVERNED_EXTRACTION_RETRY` | §8, §10 | Terminal; not a resolver failure |
+| 10 | Case-fold alias match (`"Customer Name"` → `customer name`) | §7 | Resolves to canonical entry; physical identifier preserved |
+| 11 | Physical quoted identifier (`"CustomerName"`) | §7 | Preserved exactly in resolved output |
+| 12 | Unapproved caller requests `GOVERNED_EXTRACTION_RETRY` | §3 | Downgraded to `STRICT_DETERMINISTIC` or rejected |
+| 13 | Retry feedback after `EXTRACTION_ENUM_INVALID` | §8, §10 | Contains category code and allowed-set only; never the invalid value, never the denied field name |
+| 14 | Two consecutive retry attempts with same `(failure_category, failed_field_term)` | §8 | Request terminates on no-progress detection |
+| 15 | Use case declares `scope_columns = [...]` (column names) | §6 | Resolver refuses the declaration |
+| 16 | Use case declares `scope_dimensions = [...]` (dimension names) | §6 | Resolver maps each to the registry-owned column on each resolved entity |
+| 17 | Disambiguated registry term resolved with matching disambiguator | §13 | Resolves to the disambiguated entry |
+| 18 | Disambiguated registry term resolved with absent or mismatched disambiguator | §13 | `RESOLVER_DISAMBIGUATION_REQUIRED`; terminal |
+| 19 | Multi-entity intent with one resolving and one failing | §15 | Per-entity failure; no partial resolution emitted |
+| 20 | Drift report sections empty under `strict_drift=true` | §11, §12 | Compile succeeds |
+| 21 | Drift report has any non-empty section under `strict_drift=true` | §11, §12 | `DRIFT_STRICT_VIOLATION` at compile time |
+
+---
+
+**Document status:** Freeze Candidate v0.2. The resolver's authority surface, invariants, and behavioral contract are stable. Three architectural sections remain deferred (two-tier registry, error model, approval workflow). Two boundary contracts remain sketched at field-inventory level pending the implementation-spec pass (registry manifest schema, extracted/resolved-intent DTO schemas). Promotion to final freeze depends on either: (a) settling at least one of the three deferred architectural sections, or (b) producing the implementation-spec pass that closes the two bounded sketches — and the design history showing one path or the other was chosen deliberately.
