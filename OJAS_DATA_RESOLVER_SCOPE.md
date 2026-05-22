@@ -1,288 +1,343 @@
-# Ojas Data Resolver Scope Document
+# Ojas Data — Resolver Scope (v1.0)
 
-**Version:** v0.1
-**Status:** Draft for review
-**Scope:** ojas-data resolver (Core)
+The Resolver Scope document specifies the resolver-layer authority and the compile-time path that produces it. It covers alias normalization, qualified aliases, registry compilation, scope handling, and drift detection.
+
+For LLM-facing safety rules (channels, prompt design, hint emission, DB error handling), see [`OJAS_DATA_QUERY_REPAIR_BOUNDARY.md`](./OJAS_DATA_QUERY_REPAIR_BOUNDARY.md). For the developer onboarding flow (scanner, review CLI, conformance testing), see [`OJAS_DATA_DEVELOPER_GUIDE.md`](./OJAS_DATA_DEVELOPER_GUIDE.md).
 
 ---
 
-## 1. Purpose and boundary
+## 1. Resolver authority model
 
-The Ojas Data resolver is the component that turns an extracted user intent — already produced by the LLM extraction layer — into a deterministically-resolved set of governed metadata references that the policy engine, scope injector, credential selector, and query builder can act on. It is the load-bearing component for closed-world enforcement: every column, table, alias, and scope dimension that downstream layers operate on must have passed through the resolver.
+### 1.1 Closed-world principle
 
-The resolver owns the following responsibilities:
+The resolver matches business terms to fields **only** within the compiled metadata registry. A column that exists in the database but is not in the registry is, from the resolver's perspective, nonexistent.
 
-- Mapping extracted intent fields onto registered metadata entries — tables, columns, aliases, and declared scope dimensions
-- Detecting and surfacing ambiguity as a terminal condition rather than guessing
-- Producing an immutable resolved-intent structure that downstream layers consume as authoritative
-- Refusing to resolve any reference that is not present in the compiled metadata registry
-- Emitting structured resolution failures that the audit trail and (where permitted) the extraction-retry cell can consume
+This principle has three direct consequences:
 
-The resolver explicitly does not own:
+- **No runtime schema discovery.** The resolver never queries the database to learn what columns exist. It uses the compiled registry's snapshot of approved entries.
+- **No runtime authority extension.** Drift detection may report new columns; it never adds them to the runtime registry.
+- **No inference of unknown terms.** If a term doesn't normalize to a registered alias, resolution fails terminally with `RESOLVER_UNKNOWN_FIELD_TERM` or `RESOLVER_UNKNOWN_ENTITY_TERM`.
 
-- LLM extraction or candidate generation (upstream)
-- Policy decisions about who may read which fields (downstream, owned by the policy engine)
-- Sensitive-field blocking, row-scope predicate injection, or credential selection (downstream, owned by governance gates)
-- Query construction, AST validation, dry-run execution, or result masking (downstream, owned by query builder and execution layers)
-- Audit ledger formatting or persistence (orthogonal, owned by audit)
+### 1.2 Three-layer authority chain
 
-The resolver sits between LLM extraction and the governance gates. Its outputs are consumed by every downstream component, but it consults no downstream component during resolution. Resolution is a pure function of the extracted intent and the compiled metadata registry. This purity is what allows the closed-world guarantee to hold: there is no path by which a downstream component, an LLM retry, or an environmental side-effect can introduce a metadata reference that did not pass through the resolver.
+Authority for the resolver flows through three layers, separated by responsibility:
 
-| Layer | Owns | Consumes from resolver |
+```
+Scanner output → Developer review → Compiled registry
+  (discovery)     (approval)        (runtime authority)
+```
+
+- **Scanner output** discovers what exists in the database. It produces draft entities with draft aliases and heuristic suggestions. The scanner has no runtime authority.
+- **Developer review** approves what is exposed, classifies sensitivity, assigns scope dimensions, and authors meaningful aliases. The developer's approvals are recorded in an overlay artifact that the compiler merges with scanner output.
+- **Compiled registry** is the runtime authority. It is immutable per compile, reviewable as an artifact, and the only input the runtime resolver consults.
+
+### 1.3 The compile step
+
+The compile step takes:
+- Scanner output (the discovered structure)
+- Developer overlay (the approved meaning)
+
+and produces:
+- Compiled metadata registry (immutable runtime artifact)
+- Reverse-alias index (for Safe Business-Term Hinting)
+- Reviewable artifacts emitted alongside the registry
+
+Compile failures are typed:
+- `DRAFT_ENTRIES_REMAIN` — registry contains entries not approved by developer review
+- `VALIDATION_FAILED` — manifest validation rules violated
+- `CASE_FOLD_COLLISION` — two physical identifiers normalize to the same case-folded form
+- `ALIAS_COLLISION` — two aliases normalize to the same form within a scope (see §3.5)
+- `BINDING_DANGLING` — a `dataBindingRef` points to no `data-binding-v1` entry
+- `CONTRACT_REFERENCE_INVALID` — a referenced canonical contract is not registered or is deprecated
+
+Each failure produces a stable exit code (see [`OJAS_DATA_DEVELOPER_GUIDE.md`](./OJAS_DATA_DEVELOPER_GUIDE.md)).
+
+---
+
+## 2. Alias normalization
+
+### 2.1 Match vs execute separation
+
+Matching against the registry is case-insensitive and normalized. Execution against the database preserves identifiers verbatim.
+
+- **Matching:** terms are normalized through the N1–N7 pipeline, then looked up against the normalized form of registered aliases
+- **Execution:** the physical identifier from the registry is emitted to the database exactly as written in the source manifest
+
+A case-fold collision between two physical identifiers (e.g., `CustomerName` and `customername`) is a **compile-time error**. The author must resolve the collision before the registry compiles.
+
+### 2.2 The N1–N7 normalization pipeline
+
+Applied uniformly to author-declared aliases and to user/LLM-provided terms:
+
+| Step | Operation | Example |
+|------|-----------|---------|
+| N1 | Unicode NFKC normalization | `"E\u00ADmail"` → `"Email"` |
+| N2 | Lowercase | `"Email"` → `"email"` |
+| N3 | Replace separators (`-`, `_`, `.`) with space | `"contact-info"` → `"contact info"` |
+| N4 | Collapse whitespace | `"contact    info"` → `"contact info"` |
+| N5 | Strip leading/trailing whitespace | `"  contact "` → `"contact"` |
+| N6 | Strip surrounding punctuation | `"contact."` → `"contact"` |
+| N7 | Strip diacritics (NFKD + drop combining marks) | `"café"` → `"cafe"` |
+
+### 2.3 NFKC coverage notes
+
+N1 (NFKC) normalizes full-width forms to their half-width equivalents. CJK input forms are covered through this step. Implementers should not add additional half-width-folding logic.
+
+### 2.4 Locale-controlled diacritic stripping
+
+N7 is destructive for languages where diacritics carry meaning (Spanish, French, German, Vietnamese). For English-first deployments this is correct. For multilingual deployments, N7 must be controllable per locale.
+
+The compile manifest may specify:
+
+```yaml
+normalization:
+  diacritic_stripping:
+    enabled: true
+    locales: [en, en-US, en-GB]
+```
+
+When the locale of an incoming term doesn't match the enabled list, N7 is skipped for that term. The default for v1.0 is `enabled: true` for all locales; multilingual deployments must explicitly configure exceptions.
+
+### 2.5 Normalization pipeline versioning
+
+The N1–N7 pipeline is versioned. Every compiled registry records:
+
+```yaml
+normalization_pipeline_version: "1.0"
+```
+
+Pipeline changes (a future N8 step, or a different N7 algorithm) require a full registry recompile. In-place alias index migration is not permitted. The compile produces a new artifact with a new version identifier.
+
+---
+
+## 3. Qualified aliases
+
+### 3.1 Purpose
+
+When two columns share a business term, the resolver cannot unambiguously map the term to one column. Qualified aliases resolve this by adding a business-meaningful disambiguator to one or both aliases.
+
+Bad (mechanical): `customer.status`, `invoice.status`
+Better (qualified): `customer status`, `invoice status`
+Best (business-domain): `account status`, `payment status`
+
+### 3.2 The Qualified Alias Rule (freeze)
+
+> Ojas Data may use qualified aliases to resolve normalized alias collisions. Author-supplied meaningful qualifiers are preferred. Compiler-generated qualifiers may be used only as an explicit compile-time opt-in and must be deterministic, reviewable, marked as compiler-generated, and included in the compiled registry. Runtime-generated qualifiers are forbidden. Qualified aliases are first-class business aliases: they may be used in resolver matching, safe user clarification, and Safe Business-Term Hinting if they pass policy, scope, and sensitivity gates. The registered qualified form is emitted consistently across scopes; runtime must not simplify or invent qualifier forms.
+
+### 3.3 Qualifier types
+
+Each qualified alias in the compiled registry carries a `qualifier_type` annotation:
+
+| Type | Example | Use when |
 |---|---|---|
-| LLM extraction | Intent extraction, candidate generation, schema repair | — |
-| **Resolver (this document)** | **Metadata resolution, ambiguity detection, closed-world enforcement** | **—** |
-| Policy engine | Access decisions, sensitive-field rules | Resolved metadata references |
-| Scope injector | Row-scope predicate construction | Resolved scope dimensions |
-| Credential selector | Least-privilege credential mapping | Resolved entity access classes |
-| Query builder | SQL/DSL generation, AST validation | Resolved metadata + governance decisions |
-| Execution | Query execution, masking, result shape | Approved, scoped query |
-| Audit | Evidence ledger | Every resolution outcome |
+| `ENTITY` | `customer email`, `account email` | Same field concept across entities |
+| `ROLE` | `billing contact`, `shipping contact` | Same person/contact in different business roles |
+| `LIFECYCLE` | `current status`, `previous status` | Same field concept differs by time/state |
+| `OWNERSHIP` | `employee address`, `company address` | Same attribute applies to different owners |
+| `DOMAIN` | `visa status`, `payment status`, `academic status` | Same word has different business meanings |
+| `RELATIONSHIP` | `parent customer name`, `child customer name` | Same entity participates in different relationships |
 
-## 2. Core invariants
+Reviewers verify that the qualifier type matches the business distinction.
 
-The resolver enforces four invariants. These are not configuration; they are architectural commitments and are not made optional by any runtime mode.
+### 3.4 Alias origin metadata
 
-**Closed-world metadata.** A reference resolves only if it exists in the compiled metadata registry. The registry is the resolver's view of the schema, not the database. A column that exists in the database but not in the registry is treated identically to a column that does not exist at all. Introspection of the live database is used to validate and reconcile the registry against reality, never to extend it.
+Each alias in the compiled registry carries an `alias_origin`:
 
-**Terminal ambiguity.** When an extracted reference matches more than one registry entry — by alias, canonical name, or case-fold equivalence — resolution does not pick one. It emits an ambiguity failure that names the candidates. The caller's options are clarification, registry disambiguation, or abandonment. There is no silent selection, no "most likely" candidate, and no positional fallback.
+- `AUTHOR_SUPPLIED` — written by the developer in the source manifest
+- `SCANNER_SUGGESTED` — proposed by the scanner, approved by the developer
+- `COMPILER_GENERATED` — synthesized by the compiler under `auto_qualify_alias_collisions` opt-in
+- `IMPORTED` — brought in from a registered alias library (reserved for future use)
 
-**Deterministic authority.** Given a fixed registry version and a fixed extracted intent, resolution produces a fixed result. There is no randomness, no LLM call, and no retrieval-augmented disambiguation inside the resolver. Two callers with the same inputs receive the same outputs.
+The two annotations (`alias_origin` and `qualifier_type`) are orthogonal — every qualified alias has both.
 
-**Retry never changes authority.** The extraction-retry cell may re-ask the LLM and produce a new extracted intent. That new intent is resolved from zero against the same registry. The resolver does not retain partial resolution state across retry attempts, does not relax matching rules on subsequent attempts, and does not learn from prior failures within a request. Authority is recomputed every time.
+### 3.5 Scope-aware alias collision rule (freeze)
 
-| Invariant | What it forbids | Where it is enforced |
-|---|---|---|
-| Closed world | LLM-invented columns; introspection auto-include | Registry lookup step |
-| Terminal ambiguity | Silent candidate selection; positional fallback | Match-set evaluation step |
-| Deterministic authority | LLM-in-the-loop disambiguation; randomized tiebreak | Whole resolver |
-| Retry never changes authority | Cross-attempt state; relaxed rules on retry | Resolver entry point |
+> After normalization, no LLM-visible alias may map to more than one visible registry field within the same authorized resolution scope. Collisions must fail compile unless explicitly resolved through approved qualified aliases or deterministic opt-in auto-qualification.
 
-## 3. Runtime modes
+The collision check operates on the **merged final alias set**, regardless of how each alias was authored or what role it plays. A natural alias on one entity and a qualified alias on another that normalize to the same form within the same scope is a collision and must fail compile.
 
-The resolver supports two runtime modes. The mode is set per-request by the calling layer and is recorded in the audit trail. There are no other modes, and there will not be a Lite mode.
+### 3.6 Compile-time collision behavior
 
-**`STRICT_DETERMINISTIC`** is the default mode. The resolver receives an extracted intent, performs resolution against the registry, and returns either a resolved-intent structure or a structured resolution failure. The LLM is not consulted during resolution. Failures are terminal for the request unless the caller is the extraction-retry cell operating under `GOVERNED_EXTRACTION_RETRY`.
-
-**`GOVERNED_EXTRACTION_RETRY`** is the approved γ-only exception mode. It does not change resolver behavior — resolution itself remains deterministic, closed-world, and ambiguity-terminal. What it changes is the *envelope* around resolution: a resolution failure of certain categories (format, schema, enum, ambiguous extraction wording) may be returned to a bounded retry cell that re-asks the LLM with sanitized feedback. Resolution failures of authority categories (unknown column, policy denial, sensitive field, scope missing, credential mismatch) remain terminal regardless of mode. Use of this mode is approval-gated at agent declaration time.
-
-| Mode | Resolver behavior | Failure routing |
-|---|---|---|
-| `STRICT_DETERMINISTIC` | Deterministic, closed-world, ambiguity-terminal | All failures terminal |
-| `GOVERNED_EXTRACTION_RETRY` | Deterministic, closed-world, ambiguity-terminal | Extraction-category failures → retry cell; authority-category failures → terminal |
-
-The two modes share the resolver. They differ only in what the caller does with a structured failure.
-
-## 4. Type and contract model
-
-The resolver uses Pydantic v2 at every boundary and frozen dataclasses internally. This split is load-bearing for two reasons: Pydantic enforces validation and produces JSON Schema at the points where contracts cross trust boundaries, and frozen dataclasses give the hot path the immutability and performance the resolver needs.
-
-The Pydantic boundary covers: the registry manifest schema authors write or generate; the extracted-intent DTO produced by the LLM layer; the resolved-intent DTO consumed by downstream layers; the structured resolution-failure types emitted on every failure path; and the authoring-validation errors raised when a manifest fails compile.
-
-The frozen-dataclass internal layer covers: the compiled registry index that resolution consults at runtime; intermediate match-set representations during resolution; and the case-fold canonical-name index. None of these cross a process boundary. None of them are mutable once constructed.
-
-The compile step is the bridge between the two layers. A Pydantic-validated manifest becomes a frozen-dataclass compiled index by way of an explicit compile function. The compiled index is the resolver's runtime authority; the manifest is the authoring authority. They are not interchangeable, and the compile step is the only path from one to the other.
-
-| Surface | Form | Crosses trust boundary? |
-|---|---|---|
-| Registry manifest | Pydantic v2 BaseModel | Yes — authored by humans, validated and approved |
-| Extracted intent DTO | Pydantic v2 BaseModel | Yes — produced by LLM layer |
-| Resolved intent DTO | Pydantic v2 BaseModel | Yes — consumed by downstream layers |
-| Resolution failure | Pydantic v2 BaseModel | Yes — consumed by audit, retry, and caller |
-| Authoring validation error | Pydantic v2 BaseModel | Yes — surfaced to manifest author |
-| Compiled registry index | Frozen dataclass + immutable maps | No — resolver-internal |
-| Case-fold canonical index | Frozen dataclass | No — resolver-internal |
-| Match-set intermediate | Frozen dataclass | No — resolver-internal |
-
-The compiled index is treated as immutable for the lifetime of a registry version. Loading a new registry version produces a new compiled index; the old one is not mutated. This means concurrent resolution against a registry version is lock-free.
-
-## 5. Metadata authority
-
-The compiled metadata registry is the resolver's source of truth about what exists, what it is called, what aliases refer to it, and what governance attributes apply. The registry is constructed from an explicit manifest authored by registry authors and approved through the manifest-approval workflow.
-
-The manifest is the authority. Decorators, builder APIs, Pydantic class declarations on entity models, or any other authoring affordance may emit draft manifest entries for convenience, but those drafts have no runtime effect until they have been compiled into a registry version and that version has been approved. Authoring affordances are scaffolding; the manifest is the structure.
-
-Database introspection plays a specific and narrow role. It is run against the live database at registry compile time and at scheduled intervals afterward. Its job is to confirm that everything the manifest declares actually exists in the database with compatible types, and to surface drift — columns that exist in the manifest but not in the database, columns that exist in the database but not in the manifest, type mismatches, constraint changes. Introspection findings are reported to the registry author. They never silently extend the registry. A column that exists in the database but not in the manifest is reported as drift and treated by the resolver as if it did not exist.
-
-This is the load-bearing line of the closed-world invariant. A developer who adds a column to a database and expects it to "just work" with the resolver will find that it does not. The expected workflow is: add the column to the database, add it to the manifest, run compile, take the new registry version through approval, deploy. The asymmetry is deliberate. It is what prevents an LLM, a tool author, or an environmental change from extending the resolver's view of what is allowed.
-
-| Source | Authority | Resolver behavior |
-|---|---|---|
-| Manifest entry | Yes, after compile and approval | Resolves; available for matching |
-| Database column not in manifest | No | Treated as nonexistent; reported as drift |
-| Manifest entry not in database | No (broken) | Compile-time error; registry version does not pass approval |
-| Introspection-only discovery | No | Logged as drift; never resolves |
-| Runtime LLM suggestion | No | Closed-world refusal |
-
-## 6. Scope enforcement
-
-Scope columns — the columns that carry tenant identifiers, organization identifiers, region identifiers, or other dimensions that scope what rows a query may return — are declared in the metadata registry at the entity/table access-policy level. This placement is deliberate. Scope is a property of the table, not a property of any individual column on it, and it is a property of the registry, not a property of any tool or use case that consults the registry.
-
-A registry entry for a table declares which scope dimensions apply to it. Each dimension names the column on that table that carries the dimension value at runtime. The mapping from dimension name (e.g., `tenant_id`) to column (e.g., `customer_tenant`) is registry-owned. Tools and use cases may declare which scope dimensions they require — for example, an analytics use case might declare `tenant_id` and `region` — but they declare the dimension, not the column. The resolver consults the registry to determine which column on each resolved entity carries each declared dimension. The LLM never sees the column name; the tool author never selects it; the scope injector receives a deterministic mapping.
-
-Field-level refinement is permitted as a special case but does not override the entity-level rule. A registry author may, on a specific column, indicate that the column itself participates in a scope dimension — for example, a denormalized column that carries a tenant identifier in a child table. The refinement points back to the entity-level dimension declaration; it does not introduce a new dimension or a new authority.
-
-The resolver's output to the scope injector is a deterministic mapping from each resolved entity to the set of scope dimensions that apply to it and the columns that carry them. The scope injector is responsible for constructing the actual predicates; the resolver is responsible for telling it which columns to inject against.
-
-### Worked example — scope_columns at entity level
-
-Suppose a registry declares two entities:
+Default: fail with structured output.
 
 ```
-entity: customer
-  columns: id, name, email, tenant_id, region
-  scope_dimensions:
-    tenant: tenant_id
-    region: region
-
-entity: customer_order
-  columns: id, customer_id, total, tenant_ref, ord_region
-  scope_dimensions:
-    tenant: tenant_ref
-    region: ord_region
-```
-
-A use case declares it requires `tenant` and `region` scope. The LLM extracts an intent to "show recent orders for active customers." The resolver maps this to the `customer` and `customer_order` entities and emits the following to the scope injector:
-
-```
-resolved_scope:
-  customer:
-    tenant -> tenant_id
-    region -> region
-  customer_order:
-    tenant -> tenant_ref
-    region -> ord_region
-```
-
-The scope injector constructs predicates: `customer.tenant_id = :tenant`, `customer.region = :region`, `customer_order.tenant_ref = :tenant`, `customer_order.ord_region = :region`. The LLM has not seen `tenant_id`, `tenant_ref`, `region`, or `ord_region`. The tool author has not picked them. The use case declared the *dimensions*. The registry declared the *columns*. The resolver produced the mapping.
-
-If the registry author later denormalizes a third entity and adds a `tenant_id` column directly, they may declare it at the field level as participating in the `tenant` dimension. The dimension is unchanged; the column-to-dimension mapping is extended.
-
-### Worked example — what scope_columns is not
-
-If a use case declared `scope_columns = ["tenant_id"]` directly (selecting column names rather than dimensions), the resolver would refuse the declaration. Column selection is registry authority, not use-case authority. The use case must declare what it needs at the dimension level. This is what the locked rule "not LLM-selected and not prompt-owned" prevents: any path by which the column name reaches the runtime through a non-registry channel.
-
-## 7. Stage 1 matching
-
-Stage 1 of resolution is the alias-and-canonical-name match. It is the only stage at which natural-language vocabulary from the LLM meets the registry. Subsequent stages operate on resolved canonical entities.
-
-Stage 1 matching is case-insensitive. The case-fold operation is Unicode case-folding — specifically, NFKC normalization followed by `casefold()` — not ASCII `lower()`. This matters for non-English schemas and for any future internationalization: Turkish dotted `İ`, German `ß`, ligatures, and combining marks all need to match consistently. ASCII `lower()` would silently mishandle these.
-
-Aliases and canonical names are folded at compile time, not at match time. The compiled registry index carries a case-fold index that maps each folded form to its canonical entry. Match-time lookup is a single map access against the folded query term.
-
-Physical database identifiers are not case-folded. They are preserved exactly as declared in the manifest and used verbatim in generated SQL or DSL. A registry author who declared a column as `"CustomerName"` in a quoted-identifier database gets `"CustomerName"` at execution time, not `customername`. The case-fold lives in Stage 1 only; downstream stages see the physical identifier.
-
-Case-fold collisions are compile-time errors. If two entries in a registry fold to the same canonical form — for example, an alias `Customer Name` on one column and an alias `customer name` on another, or two columns named `customerName` and `CustomerName` in the same scope without explicit disambiguation — the manifest does not compile. The compile error names the colliding entries and the folded form. The registry author resolves the collision either by removing one alias, by scoping the aliases to different entities, or by declaring an explicit disambiguation in the registry that overrides the default fold.
-
-The disambiguation escape hatch is for legitimate cases — for example, two tenant tables in the same database that use different casing conventions, both of which the registry must address. Disambiguation is declared explicitly per entry, not inferred. There is no mode in which collisions are silently broken by ordering, by registration time, or by any other implicit rule.
-
-### Worked example — case-insensitive match, case-preserved execution
-
-A registry entry:
-
-```
-entity: customer
-  physical_name: "Customer"     # quoted identifier in PostgreSQL
-  canonical: customer
-  aliases: ["customers", "client", "clients"]
-  columns:
-    - canonical: full_name
-      physical_name: "FullName"
-      aliases: ["name", "customer name", "client name"]
-```
-
-An LLM extracts the intent term `Customer Name`. The resolver:
-
-1. Folds `Customer Name` → `customer name`.
-2. Looks up `customer name` in the case-fold index. It maps to `customer.full_name`.
-3. Returns the resolved reference: entity `customer`, column `full_name`.
-
-The query builder later receives the resolved reference and generates SQL using the physical identifiers: `SELECT "Customer"."FullName" FROM "Customer"`. The folded form was used for matching only; the physical form was preserved for execution.
-
-### Worked example — collision detected at compile
-
-A registry author writes:
-
-```
-entity: account
-  columns:
-    - canonical: account_number
-      aliases: ["acct no", "account #"]
-    - canonical: acct_no
-      aliases: ["acct no"]
-```
-
-The alias `acct no` appears on two different columns of the same entity. Both fold to the same form. The manifest fails compile with:
-
-```
-CASE_FOLD_COLLISION:
-  folded_form: "acct no"
+ALIAS_COLLISION:
+  normalized_alias: "status"
   entries:
-    - account.account_number (alias "acct no")
-    - account.acct_no (alias "acct no")
-  resolution: remove one alias, scope to different entities, or declare explicit disambiguation
+    - invoice.status
+    - visa_case.status
+Suggested qualified aliases:
+  - invoice status
+  - visa case status
+Action:
+  Add meaningful qualifiers or enable auto_qualify_alias_collisions.
 ```
 
-The registry version does not become available to the resolver until the collision is resolved. There is no runtime in which "acct no" could resolve to one of the two arbitrarily.
+Machine-parseable JSON output via `--output-format json`.
 
-## 8. Retry boundary
+### 3.7 Auto-qualify opt-in
 
-The resolver does not retry. The extraction layer does. This section specifies what the resolver guarantees about its interaction with the extraction-retry cell when the runtime mode is `GOVERNED_EXTRACTION_RETRY`.
+```yaml
+compile_options:
+  auto_qualify_alias_collisions: true
+  qualifier_strategy: ENTITY_CANONICAL_PREFIX_V1
+```
 
-The retry boundary is γ-only: the LLM may be re-asked to repair its extraction, but no retry attempt may change the resolver's authority decision. Every retry attempt produces a new extracted intent that is resolved from zero against the same registry. If the registry says a column does not exist, no number of retries will make it exist. If the registry says two aliases collide, no number of retries will pick one.
+Compiler-generated qualifiers are marked:
+- `alias_origin: COMPILER_GENERATED`
+- `review_required: true`
+- `qualifier_type: ENTITY` (default for entity-prefix strategy)
 
-Resolution failures fall into two categories, distinguished by whether they are extraction-repairable or authority-terminal:
+The qualifier strategy is named and versioned. Future strategies (`ENTITY_CANONICAL_PREFIX_V2`, `BUSINESS_DOMAIN_PREFIX_V1`) are introduced as additional named strategies; existing registries continue to use their pinned strategy.
 
-| Category | Example failures | Retry-eligible under `GOVERNED_EXTRACTION_RETRY` |
-|---|---|---|
-| Extraction-repairable | Malformed intent DTO, missing required intent field, invalid enum value, ambiguous wording the LLM may rephrase | Yes |
-| Authority-terminal | Unknown column or table, ambiguous reference matching multiple registry entries, sensitive-field block, scope-dimension missing, credential class mismatch, policy denial | No |
+### 3.8 First-class alias status (freeze)
 
-The boundary between the two is enforced in code, not by convention. The resolver emits a typed resolution-failure object with a category discriminator. The extraction-retry cell consumes only objects with the extraction-repairable discriminator. Any other failure is propagated terminally to the caller and to the audit ledger.
+> A qualified alias is not a hint-only string. It is a first-class registry alias. If Ojas emits it in Safe Business-Term Hinting or user clarification, the resolver must be able to resolve that exact alias later.
 
-**Sanitized retry feedback.** When a resolution failure is routed to the retry cell, the feedback message that reaches the LLM contains only the category label and the allowed alternatives — never the denied field name, never the denied value, never the reason for denial, never the missing row-scope predicate, never a credential-class hint, and never a database engine error. The retry cell constructs the LLM-facing message from a fixed template that takes only the category and the allowed-set as inputs. The full failure record, with all detail, goes to the audit ledger; the LLM sees only what the template emits.
+This is the round-trip stability rule: what the LLM sees is what the resolver matches against. No translation layer between hint emission and resolver matching.
 
-For example, when an extracted enum value falls outside the allowed set, the retry cell may emit `"Invalid enum value. Allowed values: [VIEW_PROFILE, LIST_RECORDS, GET_STATUS]"`. It does not emit the LLM's invalid value back to the LLM, because doing so creates a probing channel: the LLM (or an adversary upstream of it) learns which strings were rejected. The allowed set is the only information that crosses back.
+### 3.9 Emission uniformity across scopes (freeze)
 
-**Runtime caps outside retry count.** The retry count is one bound. It is not sufficient on its own. The retry cell operates inside an envelope that enforces, independently of retry count: a maximum wall-clock duration per request; a maximum LLM token budget per request; a maximum tool-call count per request; no-progress detection (two consecutive retries with the same resolution-failure signature terminate the request); and circuit-breaker behavior on shared dependencies to prevent retry-storm cascades across concurrent requests.
+> The runtime emits the registered qualified form consistently. It must not simplify a qualified alias to an unqualified alias merely because the current scope makes the term temporarily unambiguous.
 
-These caps are not retry policy. They are the layer the retry policy runs inside. A request that exhausts wall-clock, tokens, or tool-call budget terminates regardless of how many retries it has left. A no-progress signal terminates regardless of budget.
+The same field has the same alias surface in every scope where it appears. Scope-dependent simplification would break round-trip stability and create LLM-facing inconsistency.
 
-**Audit.** Every retry attempt is logged with attempt number, the resolution-failure category that triggered the retry, the sanitized feedback emitted to the LLM, and the cap state (remaining budget on each axis). The audit ledger is the canonical record; the LLM's view is intentionally narrower.
+### 3.10 Strictest-wins still applies (freeze)
 
-## 9. Deferred sections
+> Qualified aliases do not bypass visibility gates. A qualified alias may be emitted only if the underlying field passes scope, policy, sensitivity, masking, and LLM-visibility checks.
 
-Three design areas are out of scope for v0.1 and have their own design passes ahead. They are named here so readers know where the boundaries are.
+A qualified alias on a sensitive field is suppressed from the LLM-facing hint channel, regardless of how natural the alias text looks.
 
-**Two-tier registry — Platform and Tenant.** v0.1 treats the registry as a single compiled artifact. A future revision will split authority into a platform-owned base layer and tenant-owned override or extension entries, with explicit precedence and inheritance rules. The two-tier design needs the resolver scope to be stable first because the precedence rules are defined relative to the resolver's authority surface.
+### 3.11 Suppression of unqualified base alias on collision
 
-**Error model — raise versus return.** v0.1 specifies that the resolver emits typed Pydantic resolution-failure objects. It does not yet specify, layer by layer, where these are raised as exceptions versus returned as values. The error-model pass will reconcile this against the retry boundary (extraction-repairable failures must be returnable, not raised), the audit ledger (every failure must be capturable regardless of raise/return), and API ergonomics (callers should not need a try/except for every resolution attempt).
+If a base alias collides and qualified aliases are registered:
 
-**Approval workflow for `GOVERNED_EXTRACTION_RETRY`.** v0.1 establishes that this mode is approval-gated at agent declaration time. It does not specify the approval workflow shape: who approves, what the approval artifact looks like, how it is bound to the agent manifest, how it is revoked, or how it interacts with the agent lifecycle. This is the largest of the three deferred items and will need to compose with the broader Ojas governance approval workflow.
+- `payment status` (registered, qualified)
+- `visa status` (registered, qualified)
+- `status` (the base term, ambiguous in this scope)
+
+The LLM-facing hint surface emits only the qualified forms. The unqualified `status` is suppressed in any scope where the collision exists.
 
 ---
 
-## Appendix A — Resolver frozen principles (v0.1)
+## 4. Scope handling
 
-1. The resolver is a pure function of extracted intent and compiled registry.
-2. Closed-world: no resolution outside the registry. Ever.
-3. Terminal ambiguity: candidate sets greater than one fail; they do not collapse.
-4. Deterministic authority: same inputs, same outputs, no LLM in the loop.
-5. Retry never changes authority: every retry attempt is a fresh resolution.
-6. `STRICT_DETERMINISTIC` is the default mode. `GOVERNED_EXTRACTION_RETRY` is the only approved exception.
-7. Pydantic v2 at every boundary; frozen dataclasses internally; compile is the only bridge.
-8. The manifest is the authoring authority; the compiled index is the runtime authority.
-9. Database introspection validates and surfaces drift; it never extends the registry.
-10. Scope columns are registry-owned at the entity level; dimensions are use-case declared; columns are never use-case or LLM selected.
-11. Stage 1 matching is Unicode case-fold (NFKC + `casefold`); physical identifiers are preserved verbatim; collisions are compile-time errors.
-12. Retry feedback is sanitized; runtime caps live outside retry count; every retry attempt is audited.
+### 4.1 Scope dimensions
 
-## Appendix B — What v0.2 will need to settle
+Scope is a multi-dimensional filter applied at resolution time. Each entity in the registry declares its scope dimensions:
 
-- Concrete schema for the Pydantic registry manifest model
-- Concrete schema for the extracted-intent DTO and resolved-intent DTO
-- Enumerated category discriminator values for resolution failures, with explicit retry-eligibility flags
-- Compile-step input/output type signature
-- Drift-report shape (introspection vs. manifest)
-- Disambiguation declaration syntax for case-fold collisions
-- Test corpus shape for the resolver (closed-world refusals, terminal ambiguity, case-fold edges, scope-dimension mapping)
+```yaml
+scope_dimensions:
+  tenant: tenant_id
+  region: region_code
+  business_unit: bu_id
+```
+
+Each dimension maps a logical scope name to a physical column. Scope filtering is enforced at query construction time; the LLM never sees the scope columns.
+
+### 4.2 Scope dimensions are not LLM-visible
+
+The LLM-facing hint surface never names scope dimension columns. A scope violation produces a generic "this query is not authorized in the current scope" message, not a "the tenant_id predicate did not match" message. Scope filtering is silent.
+
+### 4.3 Scope-aware alias visibility
+
+An alias is LLM-visible in a scope only if:
+- The entity is in scope
+- The field is in scope
+- The field is not policy-blocked in the current scope
+- The field is not classified as sensitive (sensitive fields suppress from the LLM channel; see [`OJAS_DATA_QUERY_REPAIR_BOUNDARY.md`](./OJAS_DATA_QUERY_REPAIR_BOUNDARY.md))
+
+The visibility computation runs at hint-emission time, derived from the compiled registry and the current scope.
+
+---
+
+## 5. Drift detection
+
+### 5.1 The drift rule (freeze)
+
+> Drift detected between the live database and the compiled registry produces a drift report. The drift report does not modify the registry. The registry is updated only by re-running the annotation-to-compile pipeline against an updated manifest and approving the result.
+
+Drift detection is an observation mechanism, not an authority mechanism. It alerts; it does not auto-include.
+
+### 5.2 Drift categories
+
+| Category | Meaning | Severity |
+|---|---|---|
+| `NEW_FROM_INTROSPECTION` | Column exists in DB, not in registry | Medium — coverage opportunity |
+| `REMOVED_FROM_INTROSPECTION` | Column in registry, not in DB | High — runtime errors imminent |
+| `TYPE_CHANGED` | Column type changed | High — silent type coercion risk |
+| `CONSTRAINT_CHANGED` | FK/unique/PK changed | Medium — semantic risk |
+| `NEW_INDEX` | New index detected | Low — performance signal only |
+
+### 5.3 Drift CLI output
+
+```bash
+ojas-data drift --registry compiled.ojas --db postgres://app
+```
+
+Exit codes:
+- `0` — no drift
+- non-zero — drift detected, severity in stdout
+
+Machine-parseable output via `--output-format json` for CI integration.
+
+### 5.4 Runtime drift behavior
+
+The runtime trusts the compiled registry. It does not re-check drift on every query. A query that resolves to a registry-known field but fails at the database boundary (because the field was dropped) produces a `SCHEMA_DRIFT_SUSPECTED` operational alert in the privileged audit channel.
+
+Deployments that require fresh drift verification per request must configure this explicitly. The default is "trust the compiled registry, alert on suspected drift."
+
+---
+
+## 6. Tenant boundary
+
+### 6.1 v1.0 tenant model
+
+The v1.0 design supports single-tenant deployments and multi-tenant deployments where the platform owns the entire registry. Tenant-authored overrides are deferred — see [`OJAS_DATA_DEFERRED_DESIGN_TOPICS.md`](./OJAS_DATA_DEFERRED_DESIGN_TOPICS.md).
+
+### 6.2 Per-tenant compiled registries
+
+Deployments needing tenant-specific aliases or classifications produce per-tenant compiled registries through the same compile pipeline. Per-tenant overrides at runtime are not supported in v1.0.
+
+---
+
+## 7. Resolver failure categories
+
+The resolver emits failures through a closed enum. The discriminator-first principle (see [`OJAS_DATA_QUERY_REPAIR_BOUNDARY.md`](./OJAS_DATA_QUERY_REPAIR_BOUNDARY.md)) classifies these as authority-terminal.
+
+| Category | Meaning | Retry-eligible? |
+|---|---|---|
+| `RESOLVER_UNKNOWN_ENTITY_TERM` | Term doesn't map to any registered entity | No (terminal) |
+| `RESOLVER_UNKNOWN_FIELD_TERM` | Term doesn't map to any registered field | No (terminal) |
+| `RESOLVER_AMBIGUOUS_TERM` | Term maps to multiple entries in current scope | No (terminal); may route to user clarification |
+| `RESOLVER_SCOPE_VIOLATION` | Entity/field exists but not in current scope | No (terminal) |
+| `RESOLVER_POLICY_DENIED` | Entity/field exists in scope but policy denies | No (terminal) |
+| `RESOLVER_SENSITIVE_FIELD` | Entity/field exists but classified sensitive | No (terminal) |
+
+These failures must never produce LLM-facing retry. See the Sufficient-Safe-Context rule in `OJAS_DATA_QUERY_REPAIR_BOUNDARY.md`.
+
+---
+
+## 8. Open documentation items
+
+These items are known refinements for the v1.1 documentation pass. They do not block v1.0 freeze:
+
+- Sensitive fields profile schema (referenced but not fully specified)
+- Calibration methodology per agent/task/output/domain
+- Locale-locale interaction matrix for N7
+- Conformance corpus structure for scope-aware collision testing
+
+---
+
+## Appendix A — Resolver frozen principles
+
+1. The compiled registry is the only authority for what entities and fields exist
+2. Matching is case-insensitive and normalized; execution preserves identifiers verbatim
+3. Case-fold collisions are compile-time errors
+4. The N1–N7 normalization pipeline applies uniformly to authored aliases and incoming terms
+5. The normalization pipeline is versioned; pipeline changes require full recompile
+6. Qualified aliases resolve collisions; runtime cannot invent or simplify qualifiers
+7. Qualified aliases are first-class — emitted forms must be resolvable
+8. Scope dimensions are silent — never emitted to the LLM channel
+9. Drift detection alerts; it never extends runtime authority
+10. Resolver failures are authority-terminal — never LLM-retried
