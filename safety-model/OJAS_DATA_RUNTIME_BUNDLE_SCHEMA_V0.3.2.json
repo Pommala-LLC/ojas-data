@@ -1,0 +1,708 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.ojas.dev/ojas/data-runtime-bundle/v0.3.2/schema.json",
+  "title": "Ojas Data Runtime Bundle v0.3.2",
+  "description": "Corrected schema derived from OJAS_DATA_RUNTIME_BUNDLE_MESSAGE_CATALOG_V0.3.2.md. Applies focused-review corrections S1-S14, catalog v0.3.1 corrections, and catalog v0.3.2 open-item resolutions. Per default rule: catalog wins; catalog silent => no invention, flagged in correction report.",
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,127}$",
+      "maxLength": 128,
+      "description": "Registry-style logical identifier (lowercase snake_case). Used for entity names, field names, credential handle IDs, tenant IDs, etc. NOT used for audit-id (see audit-id type)."
+    },
+    "audit-id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+      "maxLength": 128,
+      "description": "v0.3.1 D-F1 / catalog §1.1. Opaque operational identifier. Supports ULID, UUID-with-hyphens, KSUID. Distinct from registry identifier. Used for per-record operational IDs. Excludes whitespace, dots, slashes, curly braces, URL-like values."
+    },
+    "policy-id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$",
+      "maxLength": 256,
+      "description": "Dotted internal policy identifier, never LLM-supplied."
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "correlation-id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "tenant-id": { "$ref": "#/$defs/identifier" },
+    "principal-id": { "$ref": "#/$defs/identifier" },
+    "agent-id": { "$ref": "#/$defs/identifier" },
+    "runtime-session-id": { "$ref": "#/$defs/identifier" },
+    "credential-handle-id": { "$ref": "#/$defs/identifier" },
+    "external-ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024
+    },
+    "timestamp-ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "bounded-string": {
+      "type": "string",
+      "maxLength": 1024
+    },
+    "environment-code": {
+      "enum": ["local", "sandbox", "development", "qa", "uat", "staging", "production"]
+    },
+    "actor-kind-code": {
+      "enum": ["human", "agent", "runtime", "system", "operator"]
+    },
+    "emitter-code": {
+      "enum": ["ojas-data", "ojas-runtime-data", "ojas-credential-boundary-adapter", "external-authority"]
+    },
+    "dialect-code": {
+      "enum": ["postgres", "mysql", "mariadb", "sqlserver", "oracle", "sqlite", "mongodb", "dynamodb", "opensearch", "elasticsearch"]
+    },
+    "lifecycle-code": {
+      "enum": ["draft", "active", "deprecated", "disabled", "retired"]
+    },
+    "intent-code": {
+      "enum": ["lookup-record", "list-records", "aggregate", "summarize", "insert-record", "update-record", "delete-record", "export-records"]
+    },
+    "data-operation-code": {
+      "enum": ["read", "insert", "update", "delete", "export", "aggregate"]
+    },
+    "data-action-class-code": {
+      "enum": ["read-only", "mutate", "bulk-mutate", "export", "destructive", "irreversible"]
+    },
+    "data-resource-class-code": {
+      "enum": ["table", "view", "collection", "document-path", "index", "report-result", "export-object"]
+    },
+    "data-risk-class-code": {
+      "enum": ["low", "medium", "high", "critical"]
+    },
+    "sensitivity-code": {
+      "enum": ["public", "normal", "personal", "sensitive", "restricted", "secret"]
+    },
+    "masking-code": {
+      "enum": ["none", "redact", "hash", "tokenize", "email-partial", "phone-partial", "last4", "date-year-only", "custom"]
+    },
+    "data-credential-class-code": {
+      "enum": ["data-read-only", "data-scoped-write", "data-scoped-delete", "data-bulk-export", "data-break-glass"]
+    },
+    "data-decision-code": {
+      "enum": ["allowed", "denied", "needs-approval", "masked", "rewritten"]
+    },
+    "effective-decision-code": {
+      "enum": ["executed", "deny-by-policy", "deny-by-timeout", "deny-by-precondition", "deny-by-no-progress", "deny-structural"]
+    },
+    "audit-stage-code": {
+      "enum": ["pre-execution", "post-execution", "denial", "sanitized-failure", "preflight-failure", "reconciliation-gap"]
+    },
+    "operator-code": {
+      "enum": ["eq", "neq", "gt", "gte", "lt", "lte", "in", "not-in", "contains", "starts-with", "ends-with", "between", "is-null", "is-not-null"]
+    },
+    "sql-operator-code": {
+      "enum": ["sql-eq", "sql-neq", "sql-gt", "sql-gte", "sql-lt", "sql-lte", "sql-in", "sql-not-in", "sql-like", "sql-between", "sql-is-null", "sql-is-not-null"]
+    },
+    "parameter-source-code": {
+      "enum": ["scope-injection", "resolved-filter", "session-context", "policy-derived"]
+    },
+    "retry-category-code": {
+      "enum": [
+        "extraction-malformed-dto", "extraction-invalid-enum", "extraction-missing-field", "extraction-ambiguous-wording",
+        "resolver-unknown-entity", "resolver-unknown-field", "resolver-ambiguous",
+        "governance-policy-denied", "governance-sensitive-blocked",
+        "scope-dimension-missing", "credential-class-mismatch", "mutation-rejected", "precheck-failed",
+        "delete-blocked", "bulk-limit-exceeded", "stale-version", "association-missing", "duplicate-conflict",
+        "scope-mismatch", "raw-diagnostic-blocked", "no-progress-detected"
+      ]
+    },
+    "record-type-code": {
+      "description": "Catalog §5.3. S13 correction: now defined in bundle schema for cross-reference.",
+      "enum": [
+        "data-operation-audit",
+        "field-level-audit",
+        "context-binding",
+        "credential-handle-use",
+        "pre-execution-audit-binding",
+        "sanitized-feedback-routing",
+        "no-progress-halt",
+        "reconciliation-hook",
+        "mutation-preflight-orchestration",
+        "credential-handle-request",
+        "credential-selection",
+        "credential-revoke-notification",
+        "bulk-context-observed",
+        "create-after-destroy-observed",
+        "policy-response-timeout"
+      ]
+    },
+    "input-kind-code": {
+      "description": "Catalog §2.13 v0.3.1 D-C1. Discriminator for the six typed input shapes.",
+      "enum": ["read-input", "insert-input", "update-input", "delete-input", "export-input", "aggregate-input"]
+    },
+    "preflight-check-code": {
+      "description": "Catalog §2.8 closed enum.",
+      "enum": ["scope-verification", "tenant-isolation", "row-estimate", "explain-plan", "soft-delete-feasibility", "bulk-limit-check"]
+    },
+    "preflight-decision-code": {
+      "enum": ["passed", "failed", "requires-approval"]
+    },
+    "actor-context": {
+      "type": "object",
+      "required": ["actor-kind"],
+      "properties": {
+        "actor-kind": { "$ref": "#/$defs/actor-kind-code" },
+        "principal-id": { "$ref": "#/$defs/principal-id" },
+        "agent-id": { "$ref": "#/$defs/agent-id" },
+        "runtime-session-id": { "$ref": "#/$defs/runtime-session-id" }
+      },
+      "additionalProperties": false
+    },
+    "request-context": {
+      "type": "object",
+      "description": "Catalog §1.5. Digest fields are optional at schema level; runtime enforces tiered requirement per D-F4. Schema enforces Tier D (statically knowable: actor-kind=agent + mutate/export operation).",
+      "required": ["correlation-id", "tenant-id", "environment", "actor"],
+      "properties": {
+        "correlation-id": { "$ref": "#/$defs/correlation-id" },
+        "tenant-id": { "$ref": "#/$defs/tenant-id" },
+        "environment": { "$ref": "#/$defs/environment-code" },
+        "actor": { "$ref": "#/$defs/actor-context" },
+        "policy-state-digest": { "$ref": "#/$defs/digest" },
+        "instruction-context-digest": { "$ref": "#/$defs/digest" }
+      },
+      "additionalProperties": false
+    },
+    "extracted-intent": {
+      "type": "object",
+      "description": "Catalog §2.1. LLM-facing input. No SQL, no executable artifacts.",
+      "required": ["intent", "operation"],
+      "properties": {
+        "intent": { "$ref": "#/$defs/intent-code" },
+        "operation": { "$ref": "#/$defs/data-operation-code" },
+        "entity-terms": { "type": "array", "items": { "$ref": "#/$defs/bounded-string" } },
+        "field-terms": { "type": "array", "items": { "$ref": "#/$defs/bounded-string" } },
+        "filters": { "type": "array", "items": { "$ref": "#/$defs/filter-candidate" } },
+        "user-language": { "$ref": "#/$defs/bounded-string" },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "filter-candidate": {
+      "type": "object",
+      "required": ["field-term", "operator", "value-ref"],
+      "properties": {
+        "field-term": { "$ref": "#/$defs/bounded-string" },
+        "operator": { "$ref": "#/$defs/operator-code" },
+        "value-ref": { "$ref": "#/$defs/bounded-string" }
+      },
+      "additionalProperties": false
+    },
+    "resolved-intent": {
+      "type": "object",
+      "description": "Catalog §2.3. S9 correction: schema now references this structure (previously type: object). Catalog defines required fields; sub-structures (resolved-field, resolved-filter, resolved-scope-dimension) are catalog-silent — flagged in correction report.",
+      "required": ["intent", "operation", "entity", "operation-policy-id", "fields", "scope", "registry-id", "compiled-registry-digest"],
+      "properties": {
+        "intent": { "$ref": "#/$defs/intent-code" },
+        "operation": { "$ref": "#/$defs/data-operation-code" },
+        "entity": { "$ref": "#/$defs/identifier" },
+        "operation-policy-id": { "$ref": "#/$defs/policy-id" },
+        "fields": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "description": "Catalog references resolved-field but does not define its shape. SCHEMA-REVIEW: flag-don't-invent."
+          }
+        },
+        "scope": {
+          "type": "object",
+          "description": "Catalog references map of identifier → resolved-scope-dimension but does not define resolved-scope-dimension. SCHEMA-REVIEW: flag-don't-invent.",
+          "additionalProperties": { "type": "object" }
+        },
+        "filters": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "description": "Catalog references resolved-filter but does not define its shape. SCHEMA-REVIEW: flag-don't-invent."
+          }
+        },
+        "registry-id": { "$ref": "#/$defs/identifier" },
+        "compiled-registry-digest": { "$ref": "#/$defs/digest" }
+      },
+      "additionalProperties": false
+    },
+    "data-policy-decision": {
+      "type": "object",
+      "description": "Catalog §2.4. S10/S11 corrections: scope-predicates, masked-fields, blocked-fields items are catalog-silent on internal shape — flagged in correction report.",
+      "required": [
+        "decision", "operation-policy-id", "entity", "operation",
+        "action-class", "resource-class", "risk-class",
+        "allowed-fields", "credential-class", "policy-version",
+        "scope-predicates", "pre-execution-audit-required", "mutation-preflight-required"
+      ],
+      "properties": {
+        "decision": { "$ref": "#/$defs/data-decision-code" },
+        "effective-decision": { "$ref": "#/$defs/effective-decision-code" },
+        "operation-policy-id": { "$ref": "#/$defs/policy-id" },
+        "entity": { "$ref": "#/$defs/identifier" },
+        "operation": { "$ref": "#/$defs/data-operation-code" },
+        "action-class": { "$ref": "#/$defs/data-action-class-code" },
+        "resource-class": { "$ref": "#/$defs/data-resource-class-code" },
+        "risk-class": { "$ref": "#/$defs/data-risk-class-code" },
+        "allowed-fields": { "type": "array", "items": { "$ref": "#/$defs/identifier" } },
+        "credential-class": { "$ref": "#/$defs/data-credential-class-code" },
+        "policy-version": { "$ref": "#/$defs/bounded-string" },
+        "masked-fields": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "description": "Catalog references masked-field but does not define its shape. SCHEMA-REVIEW: flag-don't-invent."
+          }
+        },
+        "blocked-fields": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "description": "Catalog references blocked-field but does not define its shape. SCHEMA-REVIEW: flag-don't-invent."
+          }
+        },
+        "scope-predicates": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "description": "Catalog references scope-predicate but does not define its shape. SCHEMA-REVIEW: flag-don't-invent."
+          }
+        },
+        "approval-required": { "type": "boolean" },
+        "approval-ref": { "$ref": "#/$defs/external-ref" },
+        "pre-execution-audit-required": { "type": "boolean" },
+        "mutation-preflight-required": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "query-parameter-ref": {
+      "type": "object",
+      "required": ["source", "type"],
+      "properties": {
+        "source": { "$ref": "#/$defs/parameter-source-code" },
+        "type": { "$ref": "#/$defs/bounded-string" }
+      },
+      "additionalProperties": false,
+      "description": "Catalog §2.7. v0.3 delta: source is closed enum; no llm-literal source exists."
+    },
+    "query-where-clause": {
+      "type": "object",
+      "required": ["column", "operator", "param"],
+      "properties": {
+        "column": { "$ref": "#/$defs/bounded-string" },
+        "operator": { "$ref": "#/$defs/sql-operator-code" },
+        "param": { "$ref": "#/$defs/bounded-string" }
+      },
+      "additionalProperties": false
+    },
+    "safe-query-plan": {
+      "type": "object",
+      "description": "Catalog §2.5. Constructed by ojas-data-query-builder, never LLM.",
+      "required": ["dialect", "operation", "entity", "operation-policy-id", "compiled-registry-digest", "parameters", "query-digest"],
+      "properties": {
+        "dialect": { "$ref": "#/$defs/dialect-code" },
+        "operation": { "enum": ["select", "insert", "update", "delete", "aggregate"] },
+        "entity": { "$ref": "#/$defs/identifier" },
+        "operation-policy-id": { "$ref": "#/$defs/policy-id" },
+        "compiled-registry-digest": { "$ref": "#/$defs/digest" },
+        "parameters": {
+          "type": "object",
+          "patternProperties": {
+            "^[a-z][a-z0-9_]*$": { "$ref": "#/$defs/query-parameter-ref" }
+          },
+          "additionalProperties": false
+        },
+        "select": { "type": "array", "items": { "$ref": "#/$defs/bounded-string" } },
+        "where": { "type": "array", "items": { "$ref": "#/$defs/query-where-clause" } },
+        "set": {
+          "type": "object",
+          "patternProperties": {
+            "^[a-z][a-z0-9_]*$": { "$ref": "#/$defs/query-parameter-ref" }
+          },
+          "additionalProperties": false,
+          "description": "v0.3 delta: parameterized, never literal."
+        },
+        "limit": { "type": "integer", "minimum": 0 },
+        "query-digest": { "$ref": "#/$defs/digest" }
+      },
+      "additionalProperties": false
+    },
+    "mutation-preflight-result": {
+      "type": "object",
+      "description": "Catalog §2.8. v0.3.1 D-F2: reusable structured type, not a top-level message. Carried as data-execute-response.preflight; referenced by digest from mutation-preflight-orchestration-record.",
+      "required": ["operation-policy-id", "entity", "operation", "decision", "checks"],
+      "properties": {
+        "operation-policy-id": { "$ref": "#/$defs/policy-id" },
+        "entity": { "$ref": "#/$defs/identifier" },
+        "operation": { "$ref": "#/$defs/data-operation-code" },
+        "decision": { "$ref": "#/$defs/preflight-decision-code" },
+        "checks": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["check-name", "status"],
+            "properties": {
+              "check-name": { "$ref": "#/$defs/preflight-check-code" },
+              "status": { "enum": ["passed", "failed", "skipped"] },
+              "safe-reason-code": { "$ref": "#/$defs/bounded-string" }
+            },
+            "additionalProperties": false
+          },
+          "description": "Profile rule (v0.3 delta): scope-verification and tenant-isolation MUST be present. Profile enforcement is runtime-level; schema cannot enforce 'must include specific enum values' without complex conditionals."
+        },
+        "sanitized-feedback": { "$ref": "#/$defs/sanitized-feedback" },
+        "operator-diagnostics-ref": { "$ref": "#/$defs/external-ref" }
+      },
+      "additionalProperties": false
+    },
+    "sanitized-feedback": {
+      "type": "object",
+      "description": "Catalog §2.9. v0.3 delta: summary-template-id replaces free-text abstract-summary.",
+      "required": ["category", "retry-eligible", "summary-template-id"],
+      "properties": {
+        "category": { "$ref": "#/$defs/retry-category-code" },
+        "retry-eligible": { "type": "boolean" },
+        "summary-template-id": { "$ref": "#/$defs/identifier" },
+        "template-bindings": {
+          "type": "object",
+          "patternProperties": {
+            "^[a-z][a-z0-9_]*$": { "$ref": "#/$defs/bounded-string" }
+          },
+          "additionalProperties": false
+        },
+        "allowed-values": {
+          "type": "object",
+          "patternProperties": {
+            "^[a-z][a-z0-9_]*$": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/identifier" }
+            }
+          },
+          "additionalProperties": false
+        },
+        "halt-execution": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "input-base": {
+      "type": "object",
+      "description": "Catalog §2.13 stub. Common envelope for the six discriminated input types. NOT FREEZE-READY per §2.13 warning: full per-operation shapes deferred to future revision.",
+      "required": ["input-kind", "operation"],
+      "properties": {
+        "input-kind": { "$ref": "#/$defs/input-kind-code" },
+        "operation": { "$ref": "#/$defs/data-operation-code" }
+      },
+      "description_note": "additionalProperties intentionally NOT set to false in v0.3.2: forward-compatible payload allowance per catalog §2.13. SCHEMA-REVIEW: must close additionalProperties before freeze."
+    },
+    "read-input": {
+      "allOf": [
+        { "$ref": "#/$defs/input-base" },
+        {
+          "type": "object",
+          "properties": {
+            "input-kind": { "const": "read-input" },
+            "operation": { "const": "read" }
+          }
+        }
+      ]
+    },
+    "insert-input": {
+      "allOf": [
+        { "$ref": "#/$defs/input-base" },
+        {
+          "type": "object",
+          "properties": {
+            "input-kind": { "const": "insert-input" },
+            "operation": { "const": "insert" }
+          }
+        }
+      ]
+    },
+    "update-input": {
+      "allOf": [
+        { "$ref": "#/$defs/input-base" },
+        {
+          "type": "object",
+          "properties": {
+            "input-kind": { "const": "update-input" },
+            "operation": { "const": "update" }
+          }
+        }
+      ]
+    },
+    "delete-input": {
+      "allOf": [
+        { "$ref": "#/$defs/input-base" },
+        {
+          "type": "object",
+          "properties": {
+            "input-kind": { "const": "delete-input" },
+            "operation": { "const": "delete" }
+          }
+        }
+      ]
+    },
+    "export-input": {
+      "allOf": [
+        { "$ref": "#/$defs/input-base" },
+        {
+          "type": "object",
+          "properties": {
+            "input-kind": { "const": "export-input" },
+            "operation": { "const": "export" }
+          }
+        }
+      ]
+    },
+    "aggregate-input": {
+      "allOf": [
+        { "$ref": "#/$defs/input-base" },
+        {
+          "type": "object",
+          "properties": {
+            "input-kind": { "const": "aggregate-input" },
+            "operation": { "const": "aggregate" }
+          }
+        }
+      ]
+    },
+    "discriminated-input": {
+      "description": "S4 correction: discriminated union of the six typed input shapes per catalog §2.13.",
+      "oneOf": [
+        { "$ref": "#/$defs/read-input" },
+        { "$ref": "#/$defs/insert-input" },
+        { "$ref": "#/$defs/update-input" },
+        { "$ref": "#/$defs/delete-input" },
+        { "$ref": "#/$defs/export-input" },
+        { "$ref": "#/$defs/aggregate-input" }
+      ]
+    },
+    "data-execute-request": {
+      "type": "object",
+      "description": "Catalog §2.10. XOR rule (v0.3.1 D-C1): exactly one of extracted-intent or input must be present. pre-execution-audit-ref is structurally optional (runtime-enforced for destructive operations per D-1/PB-002).",
+      "required": ["context"],
+      "properties": {
+        "context": { "$ref": "#/$defs/request-context" },
+        "input": { "$ref": "#/$defs/discriminated-input" },
+        "extracted-intent": { "$ref": "#/$defs/extracted-intent" },
+        "pre-execution-audit-ref": { "$ref": "#/$defs/external-ref" },
+        "dry-run": { "type": "boolean" }
+      },
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": ["extracted-intent"],
+          "not": { "required": ["input"] }
+        },
+        {
+          "required": ["input"],
+          "not": { "required": ["extracted-intent"] }
+        }
+      ],
+      "allOf": [
+        {
+          "description": "Tier D digest enforcement (v0.3.1 D-F4): if actor-kind=agent AND operation is mutate/export, both digests required at request-time. Other tiers depend on post-classification fields and are runtime-only.",
+          "if": {
+            "properties": {
+              "context": {
+                "properties": {
+                  "actor": {
+                    "properties": { "actor-kind": { "const": "agent" } }
+                  }
+                }
+              },
+              "extracted-intent": {
+                "properties": {
+                  "operation": { "enum": ["insert", "update", "delete", "export"] }
+                }
+              }
+            },
+            "required": ["extracted-intent"]
+          },
+          "then": {
+            "properties": {
+              "context": {
+                "required": ["policy-state-digest", "instruction-context-digest"]
+              }
+            }
+          }
+        },
+        {
+          "description": "Tier D digest enforcement for typed-input path: same rule applies via input.operation.",
+          "if": {
+            "properties": {
+              "context": {
+                "properties": {
+                  "actor": {
+                    "properties": { "actor-kind": { "const": "agent" } }
+                  }
+                }
+              },
+              "input": {
+                "properties": {
+                  "operation": { "enum": ["insert", "update", "delete", "export"] }
+                }
+              }
+            },
+            "required": ["input"]
+          },
+          "then": {
+            "properties": {
+              "context": {
+                "required": ["policy-state-digest", "instruction-context-digest"]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "data-execute-response": {
+      "type": "object",
+      "description": "Catalog §2.11. v0.3.1 D-F3: audit field references evidence-record (envelope-wrapped) via cross-schema $ref. preflight references mutation-preflight-result. credential-selection and resolved-intent now typed (S7, S8, S9, S12 corrections).",
+      "required": ["correlation-id", "decision", "audit", "effective-decision"],
+      "properties": {
+        "correlation-id": { "$ref": "#/$defs/correlation-id" },
+        "decision": { "$ref": "#/$defs/data-policy-decision" },
+        "audit": {
+          "$ref": "https://schemas.ojas.dev/ojas/evidence-store/v0.3.2/schema.json#/$defs/evidence-record",
+          "description": "S7 correction: envelope-wrapped per v0.3.1 D-F3. Cross-schema $ref to evidence-store. Payload discriminated by record-type."
+        },
+        "effective-decision": { "$ref": "#/$defs/effective-decision-code" },
+        "resolved-intent": {
+          "$ref": "#/$defs/resolved-intent",
+          "description": "S9 correction: typed; was type: object."
+        },
+        "preflight": {
+          "$ref": "#/$defs/mutation-preflight-result",
+          "description": "S8 / v0.3.1 D-F2 correction: typed via reusable $defs entry; was type: object."
+        },
+        "query-plan": { "$ref": "#/$defs/safe-query-plan" },
+        "credential-selection": {
+          "$ref": "#/$defs/credential-selection",
+          "description": "S12 correction: typed; was type: object."
+        },
+        "data": {
+          "description": "Catalog says 'structured result shape' — shape is per-operation and catalog-silent on detail. SCHEMA-REVIEW: flag-don't-invent."
+        },
+        "sanitized-feedback": { "$ref": "#/$defs/sanitized-feedback" }
+      },
+      "additionalProperties": false
+    },
+    "sql-review-request": {
+      "type": "object",
+      "description": "Catalog §2.12. The only path that carries raw SQL. Requires reviewer attestation and elevated policy. NOT accessible to agents (runtime enforces actor-kind != agent).",
+      "required": ["context", "sql", "mode", "reviewer-principal-id", "elevated-policy-ref"],
+      "properties": {
+        "context": { "$ref": "#/$defs/request-context" },
+        "sql": { "$ref": "#/$defs/bounded-string" },
+        "mode": { "enum": ["review-only", "rewrite-if-safe", "execute-if-approved"] },
+        "reviewer-principal-id": { "$ref": "#/$defs/principal-id" },
+        "elevated-policy-ref": { "$ref": "#/$defs/external-ref" }
+      },
+      "additionalProperties": false
+    },
+    "sql-review-response": {
+      "type": "object",
+      "description": "Catalog §2.12. audit field cross-schema $ref to evidence-record per v0.3.1 D-F3.",
+      "required": ["correlation-id", "decision", "audit"],
+      "properties": {
+        "correlation-id": { "$ref": "#/$defs/correlation-id" },
+        "decision": { "$ref": "#/$defs/data-decision-code" },
+        "safe-query-plan": { "$ref": "#/$defs/safe-query-plan" },
+        "rewritten-sql-digest": { "$ref": "#/$defs/digest" },
+        "sanitized-feedback": { "$ref": "#/$defs/sanitized-feedback" },
+        "audit": {
+          "$ref": "https://schemas.ojas.dev/ojas/evidence-store/v0.3.2/schema.json#/$defs/evidence-record"
+        }
+      },
+      "additionalProperties": false
+    },
+    "credential-handle-request": {
+      "type": "object",
+      "description": "Catalog §4.1 with v0.3.2 O-1 resolution: entity and operation are required. Primary home: bundle schema $defs. Referenced as evidence-record.payload when record-type=credential-handle-request.",
+      "required": [
+        "correlation-id", "operation-policy-id", "entity", "operation",
+        "requested-credential-class", "requested-scope", "runtime-session-id", "actor"
+      ],
+      "properties": {
+        "correlation-id": { "$ref": "#/$defs/correlation-id" },
+        "operation-policy-id": { "$ref": "#/$defs/policy-id" },
+        "entity": {
+          "$ref": "#/$defs/identifier",
+          "description": "v0.3.2 O-1: required. The data entity this handle is being requested for."
+        },
+        "operation": {
+          "$ref": "#/$defs/data-operation-code",
+          "description": "v0.3.2 O-1: required. The operation the handle will enable."
+        },
+        "requested-credential-class": { "$ref": "#/$defs/data-credential-class-code" },
+        "requested-scope": {
+          "type": "object",
+          "patternProperties": {
+            "^[a-z][a-z0-9_]*$": { "$ref": "#/$defs/bounded-string" }
+          },
+          "additionalProperties": false
+        },
+        "runtime-session-id": { "$ref": "#/$defs/runtime-session-id" },
+        "actor": { "$ref": "#/$defs/actor-context" },
+        "requested-ttl-seconds": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "credential-selection": {
+      "type": "object",
+      "description": "Catalog §4.2. Carries handle and scope, never the credential.",
+      "required": [
+        "operation-policy-id", "credential-class", "credential-handle-id",
+        "credential-handle-digest", "scope", "scope-snapshot-digest", "ttl-seconds"
+      ],
+      "properties": {
+        "operation-policy-id": { "$ref": "#/$defs/policy-id" },
+        "credential-class": { "$ref": "#/$defs/data-credential-class-code" },
+        "credential-handle-id": { "$ref": "#/$defs/credential-handle-id" },
+        "credential-handle-digest": { "$ref": "#/$defs/digest" },
+        "scope": {
+          "type": "object",
+          "patternProperties": {
+            "^[a-z][a-z0-9_]*$": { "$ref": "#/$defs/bounded-string" }
+          },
+          "additionalProperties": false
+        },
+        "scope-snapshot-digest": { "$ref": "#/$defs/digest" },
+        "ttl-seconds": { "type": "integer", "minimum": 1 },
+        "approval-ref": { "$ref": "#/$defs/external-ref" }
+      },
+      "additionalProperties": false
+    },
+    "credential-revoke-notification": {
+      "type": "object",
+      "description": "Catalog §4.3.",
+      "required": ["credential-handle-id", "revoked-at-ms", "reason-code", "signed-by-authority-digest"],
+      "properties": {
+        "credential-handle-id": { "$ref": "#/$defs/credential-handle-id" },
+        "revoked-at-ms": { "$ref": "#/$defs/timestamp-ms" },
+        "reason-code": {
+          "enum": ["rotated", "policy-revoked", "scope-changed", "lifecycle-expired"]
+        },
+        "signed-by-authority-digest": { "$ref": "#/$defs/digest" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "oneOf": [
+    { "$ref": "#/$defs/extracted-intent" },
+    { "$ref": "#/$defs/data-execute-request" },
+    { "$ref": "#/$defs/data-execute-response" },
+    { "$ref": "#/$defs/safe-query-plan" },
+    { "$ref": "#/$defs/data-policy-decision" },
+    { "$ref": "#/$defs/sanitized-feedback" },
+    { "$ref": "#/$defs/sql-review-request" },
+    { "$ref": "#/$defs/sql-review-response" },
+    { "$ref": "#/$defs/resolved-intent" }
+  ]
+}
