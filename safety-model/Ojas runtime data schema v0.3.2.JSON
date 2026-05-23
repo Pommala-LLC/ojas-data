@@ -1,0 +1,381 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.ojas.dev/ojas/runtime-data/v0.3.2/schema.json",
+  "title": "Ojas Runtime-Data Records v0.3.2",
+  "description": "Corrected schema per catalog v0.3.2 §3 and v0.3.1 D-F3 strict envelope wrapping. All audit records previously top-level in v0.1 are now $defs only — they appear on the wire only as evidence-record.payload (cross-schema $ref from evidence-store). Top-level oneOf retains only wire-protocol messages (pre-execution gate exchange and policy-response-timeout). audit-id references now use bundle schema's audit-id type via cross-schema $ref (v0.3.1 D-F1).",
+  "$defs": {
+    "identifier": {
+      "$ref": "https://schemas.ojas.dev/ojas/data-runtime-bundle/v0.3.2/schema.json#/$defs/identifier"
+    },
+    "audit-id": {
+      "$ref": "https://schemas.ojas.dev/ojas/data-runtime-bundle/v0.3.2/schema.json#/$defs/audit-id"
+    },
+    "correlation-id": {
+      "$ref": "https://schemas.ojas.dev/ojas/data-runtime-bundle/v0.3.2/schema.json#/$defs/correlation-id"
+    },
+    "tenant-id": {
+      "$ref": "https://schemas.ojas.dev/ojas/data-runtime-bundle/v0.3.2/schema.json#/$defs/tenant-id"
+    },
+    "principal-id": {
+      "$ref": "https://schemas.ojas.dev/ojas/data-runtime-bundle/v0.3.2/schema.json#/$defs/principal-id"
+    },
+    "agent-id": {
+      "$ref": "https://schemas.ojas.dev/ojas/data-runtime-bundle/v0.3.2/schema.json#/$defs/agent-id"
+    },
+    "runtime-session-id": {
+      "$ref": "https://schemas.ojas.dev/ojas/data-runtime-bundle/v0.3.2/schema.json#/$defs/runtime-session-id"
+    },
+    "credential-handle-id": {
+      "$ref": "https://schemas.ojas.dev/ojas/data-runtime-bundle/v0.3.2/schema.json#/$defs/credential-handle-id"
+    },
+    "policy-id": {
+      "$ref": "https://schemas.ojas.dev/ojas/data-runtime-bundle/v0.3.2/schema.json#/$defs/policy-id"
+    },
+    "digest": {
+      "$ref": "https://schemas.ojas.dev/ojas/data-runtime-bundle/v0.3.2/schema.json#/$defs/digest"
+    },
+    "external-ref": {
+      "$ref": "https://schemas.ojas.dev/ojas/data-runtime-bundle/v0.3.2/schema.json#/$defs/external-ref"
+    },
+    "timestamp-ms": {
+      "$ref": "https://schemas.ojas.dev/ojas/data-runtime-bundle/v0.3.2/schema.json#/$defs/timestamp-ms"
+    },
+    "bounded-string": {
+      "$ref": "https://schemas.ojas.dev/ojas/data-runtime-bundle/v0.3.2/schema.json#/$defs/bounded-string"
+    },
+    "actor-context": {
+      "$ref": "https://schemas.ojas.dev/ojas/data-runtime-bundle/v0.3.2/schema.json#/$defs/actor-context"
+    },
+    "data-operation-code": {
+      "$ref": "https://schemas.ojas.dev/ojas/data-runtime-bundle/v0.3.2/schema.json#/$defs/data-operation-code"
+    },
+    "audit-stage-code": {
+      "$ref": "https://schemas.ojas.dev/ojas/data-runtime-bundle/v0.3.2/schema.json#/$defs/audit-stage-code"
+    },
+    "effective-decision-code": {
+      "$ref": "https://schemas.ojas.dev/ojas/data-runtime-bundle/v0.3.2/schema.json#/$defs/effective-decision-code"
+    },
+    "binding-source-code": {
+      "description": "Catalog §3.1.",
+      "enum": ["session-claim", "mtls-cert", "header-attestation", "external-iam-token"]
+    },
+    "no-progress-reason-code": {
+      "description": "Catalog §3.5.",
+      "enum": [
+        "identical-request-retry-burst",
+        "near-identical-request-retry-burst",
+        "cud-failure-repair-attempt",
+        "retry-after-terminal-feedback",
+        "bulk-threshold-breach-burst"
+      ]
+    },
+    "truth-source-code": {
+      "description": "Catalog §3.7.",
+      "enum": ["postgres-wal", "mysql-binlog", "mongo-oplog", "cloud-provider-audit", "none-available"]
+    },
+    "reconciliation-priority-code": {
+      "description": "Catalog §3.7.",
+      "enum": ["continuous", "periodic", "not-reconcilable"]
+    },
+    "context-binding-record": {
+      "type": "object",
+      "description": "Catalog §3.1. v0.3.1 D-F3: NOT a standalone protocol message. Appears only as evidence-record.payload when record-type=context-binding.",
+      "required": ["runtime-session-id", "bound-at-ms", "tenant-binding-source", "actor-binding-source"],
+      "properties": {
+        "runtime-session-id": { "$ref": "#/$defs/runtime-session-id" },
+        "bound-at-ms": { "$ref": "#/$defs/timestamp-ms" },
+        "tenant-binding-source": { "$ref": "#/$defs/binding-source-code" },
+        "actor-binding-source": { "$ref": "#/$defs/binding-source-code" },
+        "binding-claims-digest": { "$ref": "#/$defs/digest" }
+      },
+      "additionalProperties": false
+    },
+    "credential-handle-use-record": {
+      "type": "object",
+      "description": "Catalog §3.2. v0.3.1 D-F3: NOT a standalone protocol message. Appears only as evidence-record.payload when record-type=credential-handle-use.",
+      "required": [
+        "credential-handle-id", "credential-handle-digest", "scope-snapshot-digest",
+        "used-at-ms", "operation-policy-id", "operation"
+      ],
+      "properties": {
+        "credential-handle-id": { "$ref": "#/$defs/credential-handle-id" },
+        "credential-handle-digest": { "$ref": "#/$defs/digest" },
+        "scope-snapshot-digest": { "$ref": "#/$defs/digest" },
+        "used-at-ms": { "$ref": "#/$defs/timestamp-ms" },
+        "operation-policy-id": { "$ref": "#/$defs/policy-id" },
+        "operation": { "$ref": "#/$defs/data-operation-code" },
+        "outcome-code": { "enum": ["success", "scope-mismatch", "revoked-mid-use", "ttl-expired"] }
+      },
+      "additionalProperties": false
+    },
+    "pre-execution-audit-binding": {
+      "type": "object",
+      "description": "Catalog §3.3. v0.3.1 D-F3: NOT a standalone protocol message. Appears only as evidence-record.payload when record-type=pre-execution-audit-binding. v0.3 delta: bound-policy-decision-digest and bound-query-digest verified by executor; mismatched bindings refused as deny-structural.",
+      "required": ["audit-id", "bound-policy-decision-digest", "bound-query-digest", "bound-at-ms"],
+      "properties": {
+        "audit-id": { "$ref": "#/$defs/audit-id" },
+        "bound-policy-decision-digest": { "$ref": "#/$defs/digest" },
+        "bound-query-digest": { "$ref": "#/$defs/digest" },
+        "bound-at-ms": { "$ref": "#/$defs/timestamp-ms" },
+        "binding-status": { "enum": ["pending-gate", "approved", "denied", "timed-out"] }
+      },
+      "additionalProperties": false
+    },
+    "sanitized-feedback-routing-record": {
+      "type": "object",
+      "description": "Catalog §3.4. v0.3.1 D-F3: NOT a standalone protocol message. Appears only as evidence-record.payload when record-type=sanitized-feedback-routing.",
+      "required": ["correlation-id", "category", "routed-at-ms", "destination-actor-kind"],
+      "properties": {
+        "correlation-id": { "$ref": "#/$defs/correlation-id" },
+        "category": { "$ref": "#/$defs/bounded-string" },
+        "routed-at-ms": { "$ref": "#/$defs/timestamp-ms" },
+        "destination-actor-kind": { "enum": ["agent", "operator", "human"] },
+        "halt-execution": { "type": "boolean" },
+        "raw-diagnostic-suppressed": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "no-progress-halt-record": {
+      "type": "object",
+      "description": "Catalog §3.5 with v0.3.2 O-2 resolution. v0.3.1 D-F3: NOT a standalone protocol message. Appears only as evidence-record.payload when record-type=no-progress-halt. terminal boolean retained as canonical for v0.3.x (O-2).",
+      "required": [
+        "runtime-session-id", "agent-id", "reason",
+        "window-seconds", "event-count-in-window", "halt-at-ms", "terminal"
+      ],
+      "properties": {
+        "runtime-session-id": { "$ref": "#/$defs/runtime-session-id" },
+        "agent-id": { "$ref": "#/$defs/agent-id" },
+        "reason": { "$ref": "#/$defs/no-progress-reason-code" },
+        "window-seconds": { "type": "integer", "minimum": 1 },
+        "event-count-in-window": { "type": "integer", "minimum": 1 },
+        "halt-at-ms": { "$ref": "#/$defs/timestamp-ms" },
+        "terminal": {
+          "type": "boolean",
+          "description": "v0.3.2 O-2: boolean form canonical for v0.3.x. Separate per-request vs session-terminal record types not introduced; would be v0.4+ design change if revisited."
+        }
+      },
+      "additionalProperties": false
+    },
+    "field-level-audit-record": {
+      "type": "object",
+      "description": "Catalog §3.6 with v0.3.1 corrections. v0.3.1 D-F3: NOT a standalone protocol message. Appears only as evidence-record.payload when record-type=field-level-audit. v0.3.1 correction: emitter = ojas-runtime-data (was incorrectly ojas-data in v0.3 §3.6 text). audit-id is opaque (v0.3.1 D-F1). v0.3 delta: fields-returned is required for post-execution read/aggregate/export.",
+      "required": [
+        "audit-id", "stage", "emitter", "correlation-id", "entity", "operation", "created-at-ms"
+      ],
+      "properties": {
+        "audit-id": { "$ref": "#/$defs/audit-id" },
+        "stage": { "$ref": "#/$defs/audit-stage-code" },
+        "emitter": {
+          "const": "ojas-runtime-data",
+          "description": "v0.3.1 correction (D-F3-adjacent): aligned with §5.3 and §9.3. Was 'ojas-data' in v0.3 §3.6 text."
+        },
+        "correlation-id": { "$ref": "#/$defs/correlation-id" },
+        "entity": { "$ref": "#/$defs/identifier" },
+        "operation": { "$ref": "#/$defs/data-operation-code" },
+        "fields-returned": { "type": "array", "items": { "$ref": "#/$defs/identifier" } },
+        "fields-masked": { "type": "array", "items": { "$ref": "#/$defs/identifier" } },
+        "fields-blocked": { "type": "array", "items": { "$ref": "#/$defs/identifier" } },
+        "result-digest": { "$ref": "#/$defs/digest" },
+        "created-at-ms": { "$ref": "#/$defs/timestamp-ms" }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "description": "v0.3 delta: fields-returned required for post-execution read/aggregate/export.",
+          "if": {
+            "properties": {
+              "stage": { "const": "post-execution" },
+              "operation": { "enum": ["read", "aggregate", "export"] }
+            },
+            "required": ["stage", "operation"]
+          },
+          "then": {
+            "required": ["fields-returned"]
+          }
+        },
+        {
+          "description": "Catalog §3.6: result-digest required when stage = post-execution.",
+          "if": {
+            "properties": { "stage": { "const": "post-execution" } },
+            "required": ["stage"]
+          },
+          "then": {
+            "required": ["result-digest"]
+          }
+        }
+      ]
+    },
+    "reconciliation-hook-emit": {
+      "type": "object",
+      "description": "Catalog §3.7. v0.3.1 D-F3: NOT a standalone protocol message. Appears only as evidence-record.payload when record-type=reconciliation-hook. audit-id is opaque (v0.3.1 D-F1).",
+      "required": ["audit-id", "downstream-truth-source-code", "reconciliation-priority", "emitted-at-ms"],
+      "properties": {
+        "audit-id": { "$ref": "#/$defs/audit-id" },
+        "downstream-truth-source-code": { "$ref": "#/$defs/truth-source-code" },
+        "downstream-ref-hint": { "$ref": "#/$defs/external-ref" },
+        "reconciliation-priority": { "$ref": "#/$defs/reconciliation-priority-code" },
+        "emitted-at-ms": { "$ref": "#/$defs/timestamp-ms" }
+      },
+      "additionalProperties": false
+    },
+    "mutation-preflight-orchestration-record": {
+      "type": "object",
+      "description": "Catalog §3.8. v0.3.1 D-F3: NOT a standalone protocol message. Appears only as evidence-record.payload when record-type=mutation-preflight-orchestration. References mutation-preflight-result by digest (v0.3.1 D-F2: same logical artifact carried structurally in data-execute-response.preflight).",
+      "required": [
+        "bound-policy-decision-digest", "preflight-result-digest", "checks-attempted",
+        "safety-critical-checks-present", "orchestration-decision", "orchestrated-at-ms"
+      ],
+      "properties": {
+        "bound-policy-decision-digest": { "$ref": "#/$defs/digest" },
+        "preflight-result-digest": {
+          "$ref": "#/$defs/digest",
+          "description": "Hash of mutation-preflight-result (bundle schema $defs)."
+        },
+        "checks-attempted": {
+          "type": "array",
+          "items": {
+            "$ref": "https://schemas.ojas.dev/ojas/data-runtime-bundle/v0.3.2/schema.json#/$defs/preflight-check-code"
+          }
+        },
+        "safety-critical-checks-present": {
+          "type": "boolean",
+          "description": "Catalog §3.8 profile rule: must be true unless orchestration-decision = deny-by-precondition."
+        },
+        "orchestration-decision": { "$ref": "#/$defs/effective-decision-code" },
+        "orchestrated-at-ms": { "$ref": "#/$defs/timestamp-ms" }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "description": "Catalog §3.8 profile rule: if safety-critical-checks-present=false, orchestration-decision must be deny-by-precondition.",
+          "if": {
+            "properties": {
+              "safety-critical-checks-present": { "const": false }
+            },
+            "required": ["safety-critical-checks-present"]
+          },
+          "then": {
+            "properties": {
+              "orchestration-decision": { "const": "deny-by-precondition" }
+            }
+          }
+        }
+      ]
+    },
+    "data-operation-audit": {
+      "type": "object",
+      "description": "Catalog §5.2 (catalog labels it 'a record-type-specific payload', not a standalone message). v0.3.1 D-F3: appears only as evidence-record.payload when record-type=data-operation-audit. Emitter = ojas-data per §9.3.",
+      "required": [
+        "stage", "actor", "operation-policy-id", "entity", "operation",
+        "action-class", "resource-class", "risk-class", "policy-version", "effective-decision"
+      ],
+      "properties": {
+        "stage": { "$ref": "#/$defs/audit-stage-code" },
+        "actor": { "$ref": "#/$defs/actor-context" },
+        "operation-policy-id": { "$ref": "#/$defs/policy-id" },
+        "entity": { "$ref": "#/$defs/identifier" },
+        "operation": { "$ref": "#/$defs/data-operation-code" },
+        "action-class": {
+          "$ref": "https://schemas.ojas.dev/ojas/data-runtime-bundle/v0.3.2/schema.json#/$defs/data-action-class-code"
+        },
+        "resource-class": {
+          "$ref": "https://schemas.ojas.dev/ojas/data-runtime-bundle/v0.3.2/schema.json#/$defs/data-resource-class-code"
+        },
+        "risk-class": {
+          "$ref": "https://schemas.ojas.dev/ojas/data-runtime-bundle/v0.3.2/schema.json#/$defs/data-risk-class-code"
+        },
+        "policy-version": { "$ref": "#/$defs/bounded-string" },
+        "query-digest": { "$ref": "#/$defs/digest" },
+        "effective-decision": { "$ref": "#/$defs/effective-decision-code" },
+        "credential-class": {
+          "$ref": "https://schemas.ojas.dev/ojas/data-runtime-bundle/v0.3.2/schema.json#/$defs/data-credential-class-code"
+        },
+        "credential-handle-digest": { "$ref": "#/$defs/digest" },
+        "scope-snapshot-digest": { "$ref": "#/$defs/digest" },
+        "result-digest": { "$ref": "#/$defs/digest" },
+        "field-level-audit-ref": { "$ref": "#/$defs/external-ref" },
+        "downstream-audit-ref": { "$ref": "#/$defs/external-ref" },
+        "operator-diagnostics-ref": { "$ref": "#/$defs/external-ref" },
+        "policy-response-timeout-recorded": { "type": "boolean" }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "description": "Catalog §5.2: policy-response-timeout-recorded required when effective-decision = deny-by-timeout.",
+          "if": {
+            "properties": { "effective-decision": { "const": "deny-by-timeout" } },
+            "required": ["effective-decision"]
+          },
+          "then": {
+            "required": ["policy-response-timeout-recorded"]
+          }
+        }
+      ]
+    },
+    "pre-execution-gate-event": {
+      "type": "object",
+      "description": "Catalog §8.1. Wire-protocol message emitted on the synchronous gate path. NOT envelope-wrapped — this is the live request to external policy authority, not a stored audit record. Subject to D-1 latency budget (500ms ceiling, 200ms target).",
+      "required": [
+        "correlation-id", "tenant-id", "actor", "operation-policy-id", "entity",
+        "operation", "action-class", "resource-class", "risk-class",
+        "query-digest", "emitted-at-ms"
+      ],
+      "properties": {
+        "correlation-id": { "$ref": "#/$defs/correlation-id" },
+        "tenant-id": { "$ref": "#/$defs/tenant-id" },
+        "actor": { "$ref": "#/$defs/actor-context" },
+        "operation-policy-id": { "$ref": "#/$defs/policy-id" },
+        "entity": { "$ref": "#/$defs/identifier" },
+        "operation": { "$ref": "#/$defs/data-operation-code" },
+        "action-class": {
+          "$ref": "https://schemas.ojas.dev/ojas/data-runtime-bundle/v0.3.2/schema.json#/$defs/data-action-class-code"
+        },
+        "resource-class": {
+          "$ref": "https://schemas.ojas.dev/ojas/data-runtime-bundle/v0.3.2/schema.json#/$defs/data-resource-class-code"
+        },
+        "risk-class": {
+          "$ref": "https://schemas.ojas.dev/ojas/data-runtime-bundle/v0.3.2/schema.json#/$defs/data-risk-class-code"
+        },
+        "query-digest": { "$ref": "#/$defs/digest" },
+        "scope-snapshot-digest": { "$ref": "#/$defs/digest" },
+        "credential-class": {
+          "$ref": "https://schemas.ojas.dev/ojas/data-runtime-bundle/v0.3.2/schema.json#/$defs/data-credential-class-code"
+        },
+        "emitted-at-ms": { "$ref": "#/$defs/timestamp-ms" }
+      },
+      "additionalProperties": false
+    },
+    "pre-execution-gate-response": {
+      "type": "object",
+      "description": "Catalog §8.2. Wire-protocol message returned by external policy authority on the synchronous gate. NOT envelope-wrapped — this is the live response. Subject to D-1 latency budget.",
+      "required": ["correlation-id", "effective-decision", "decided-at-ms"],
+      "properties": {
+        "correlation-id": { "$ref": "#/$defs/correlation-id" },
+        "effective-decision": { "$ref": "#/$defs/effective-decision-code" },
+        "decided-at-ms": { "$ref": "#/$defs/timestamp-ms" },
+        "decision-rationale-code": { "$ref": "#/$defs/bounded-string" },
+        "authority-signature-digest": { "$ref": "#/$defs/digest" }
+      },
+      "additionalProperties": false
+    },
+    "policy-response-timeout": {
+      "type": "object",
+      "description": "Catalog §3.3 + D-2. Wire-protocol/event message; not envelope-wrapped at protocol level (the corresponding audit IS envelope-wrapped via data-operation-audit with effective-decision=deny-by-timeout). Recorded as forensically distinct from deny-by-policy.",
+      "required": ["correlation-id", "timeout-at-ms", "effective-decision"],
+      "properties": {
+        "correlation-id": { "$ref": "#/$defs/correlation-id" },
+        "timeout-at-ms": { "$ref": "#/$defs/timestamp-ms" },
+        "effective-decision": {
+          "const": "deny-by-timeout",
+          "description": "D-2: deny-by-timeout is forensically distinct from deny-by-policy."
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "oneOf": [
+    { "$ref": "#/$defs/pre-execution-gate-event" },
+    { "$ref": "#/$defs/pre-execution-gate-response" },
+    { "$ref": "#/$defs/policy-response-timeout" }
+  ]
+}
