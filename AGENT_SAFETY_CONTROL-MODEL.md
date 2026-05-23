@@ -211,6 +211,66 @@ The Evidence layer is what makes the other four layers defensible. Without it, e
 
 ---
 
+## 4.5 v1 packaging and Runtime coupling
+
+The layer ownership in Section 4 describes the **target architecture**. This section records the **v1 packaging reality**.
+
+In v1, Ojas Data ships with embedded data-side Runtime capabilities because standalone Ojas Runtime is not yet available as the execution host for governed data access.
+
+**This is a packaging decision, not an architectural merger.**
+
+The target architecture remains split: Ojas Data owns governed data access; Ojas Runtime owns execution binding and runtime enforcement. When a stable Ojas Runtime integration interface exists, the embedded data-side Runtime capabilities migrate from the Ojas Data bundle into Ojas Runtime module boundaries without changing the external Ojas Data contract.
+
+### v1-coupled Runtime capabilities
+
+These eight capabilities ship inside the Ojas Data v1 bundle:
+
+1. Context binding
+2. Credential-handle enforcement (data-side)
+3. Pre-execution audit binding (data-side)
+4. Sanitized feedback routing (data-side)
+5. No-progress detection (data-side)
+6. Field-level audit emission
+7. Reconciliation hooks (data-side)
+8. Mutation preflight orchestration (data-side)
+
+Capability 8 is included because Ojas Data owns mutation policy and preflight semantics, but the runtime-coupled layer must orchestrate when preflight runs before execution — especially for insert, update, delete, export, and bulk operations.
+
+### v1 module structure
+
+Split internally, released as one coherent bundle:
+
+| Module | Role |
+|---|---|
+| `ojas-data-core` | Core data access governance |
+| `ojas-data-registry` | Entity/field/policy registry |
+| `ojas-data-resolver` | LLM intent → resolved intent |
+| `ojas-data-query-builder` | Safe query plan construction |
+| `ojas-data-policy` | Operation policy evaluation |
+| `ojas-data-masking` | Field-level mask/block |
+| `ojas-data-preflight` | Mutation preflight orchestration |
+| `ojas-runtime-data` | Data-side Runtime capabilities 1–8 above |
+| `ojas-evidence-core` | Append-only audit, stream emission |
+| `ojas-credential-boundary-adapter` | Handle-only credential interface to external authority |
+
+The bundle is one deployable unit. The modules are separated so future migration is a packaging change, not a refactor.
+
+### Migration trigger
+
+The embedded data-side Runtime capabilities migrate out of the Ojas Data bundle and into Ojas Runtime module boundaries when:
+
+> A stable Ojas Runtime integration interface exists for data-side execution binding, credential-handle enforcement, audit emission, sanitized feedback routing, no-progress detection, mutation preflight orchestration, and reconciliation hooks.
+
+The trigger is **interface availability**, not Ojas Runtime feature completeness or a specific Runtime version. This allows incremental, non-breaking migration: as each Runtime interface stabilizes, the corresponding Data-bundled capability migrates. The Ojas Data external contract remains unchanged across the migration.
+
+### Path B preserved
+
+This coupling does not violate Path B. The external policy authority still owns policy decisions. The external credential authority still owns credential minting, revocation, and lifecycle. Ojas does not absorb either.
+
+What ships in the v1 bundle is the **Ojas-side enforcement and integration surface** — the modules required to make Ojas Data's safety guarantees real today, before standalone Ojas Runtime exists.
+
+---
+
 ## 5. Required invariants
 
 Properties that must hold across the system. These are testable.
@@ -369,17 +429,23 @@ SPHUTA has multiple products that emit signals into Ojas. The integration mechan
 
 The schema language question is **resolved by D-8**: with PostgreSQL append-only as the v1 Evidence Store, JSON Schema is the v1 contract language for all Ojas surfaces. CDDL/CBOR is deferred and only reconsidered if v2 adopts content-addressed evidence chains.
 
-This document is the parent. The following artifacts are produced downstream, in this order:
+This document is the parent. The following artifacts are produced downstream, in this order. Naming reflects the v1 packaging in Section 4.5 — the Ojas Data v1 release ships as a Runtime Bundle, and the catalog covers the whole bundle, not just core data contracts.
 
-1. **Ojas Runtime message catalog** — what messages does Runtime emit, what does it consume, what shape does the pre-execution event take, what does the tool-load event carry. Defined as a message catalog first; schema-language-neutral at that stage. This is the next artifact.
+1. **Ojas Data Runtime Bundle v0.3 message catalog** — schema-language-neutral catalog covering the v1 bundle scope:
+   - Ojas Data operation messages (extracted intent, resolved intent, policy decision, safe query plan, execute request/response, sql-review request/response)
+   - Runtime-data enforcement messages (context binding, credential-handle records, pre-execution audit binding, sanitized feedback routing, no-progress signals, mutation preflight orchestration)
+   - Evidence-core messages (append-only record shapes, emitter provenance, digest fields per D-8, stream emission contract per D-9)
+   - Credential-boundary adapter messages (handle-only credential interface to external authority)
+   - Bulk-context and create-after-destroy typed signals
+   - Reconciliation hook messages
 
-2. **Ojas Data v0.3 message catalog** — refinement of the prior v0.2 CDDL work, applying the seven deltas (pre-execution audit binding, bulk-context block, create-after-destroy signal, closed preflight enum, discriminated audit records, sanitized feedback templates, parameter-only query values). The catalog form is schema-language-neutral; the existing v0.2 contributes the field discipline, not the encoding.
+   This catalog refines the prior Ojas Data v0.2 CDDL work, applies the seven v0.3 deltas, and extends to the full bundle scope. The catalog form is schema-language-neutral; the existing v0.2 contributes the field discipline, not the encoding.
 
-3. **Ojas Evidence Store contract surface** — Postgres table schema (audit tables, retention policy, digest fields per D-8), retrieval API, reconciliation interface, stream emission contract per D-9.
+2. **Ojas Runtime (standalone) message catalog** — produced when the standalone Ojas Runtime module is built. Covers non-data Runtime concerns: tool calls, infrastructure mutations, sandbox boundaries, tool-load events, broader pre-execution events. Per Section 4.5 migration trigger, the data-side Runtime capabilities migrate from the Ojas Data Runtime Bundle into this catalog as the integration interface stabilizes.
 
-4. **JSON Schema artifacts** — written for all three surfaces above, generated for Java (Spring Boot), Python (LLM clients), TypeScript (consumers).
+3. **JSON Schema artifacts** — written for the bundle catalog (step 1) and the standalone Runtime catalog (step 2). Generated for Java (Spring Boot), Python (LLM clients), TypeScript (consumers).
 
-Schema decisions live in step 4, not step 1. The CDDL v0.2 work is preserved as message-catalog input for step 2; its encoding choice is deferred.
+Schema decisions live in step 3, not step 1. The CDDL v0.2 work is preserved as message-catalog input for step 1; its encoding choice is deferred.
 
 If v2 introduces content-addressed evidence chains (D-8 future direction), CDDL/CBOR may be reconsidered at that point — the digest fields in v1 are forward-compatible.
 
@@ -389,7 +455,9 @@ If v2 introduces content-addressed evidence chains (D-8 future direction), CDDL/
 
 This document is now the design baseline and freeze candidate. Seven of the ten open design decisions are resolved (D-1, D-2, D-3, D-5, D-6, D-8, D-9). Three remain explicitly deferred (D-4, D-7, D-10) to integration-time and spec-time decisions.
 
-Full freeze of this document is held pending resolution of D-4, D-7, and D-10. Until then it is a freeze candidate — strong enough to design the next layer of artifacts against (Ojas Runtime message catalog, Ojas Data v0.3 message catalog, Ojas Evidence Store contract surface), not yet strong enough to ship implementation against.
+The v1 packaging is recorded in Section 4.5: Ojas Data ships as a Runtime Bundle with eight data-side Runtime capabilities embedded, pending the standalone Ojas Runtime integration interface. The target architecture remains the Section 4 split; the bundle is a packaging decision, not an architectural merger.
+
+Full freeze of this document is held pending resolution of D-4, D-7, and D-10. Until then it is a freeze candidate — strong enough to design the next layer of artifacts against (Ojas Data Runtime Bundle v0.3 message catalog, then standalone Ojas Runtime catalog when ready), not yet strong enough to ship implementation against.
 
 The core anchor remains the only sentence that should never change:
 
