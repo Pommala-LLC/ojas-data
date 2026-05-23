@@ -1,9 +1,16 @@
 # OJAS Agent Safety Control Model
 
-**Status:** Design baseline / review candidate
-**Date:** 2026-05-23
-**Owner:** Ojas
-**Scope:** Ojas-only. Strict Path B boundaries: enforcement, credential lifecycle, workflow authority remain external.
+| Field | Value |
+|---|---|
+| Status | Design baseline / freeze candidate |
+| Freeze status | Not yet frozen — D-4, D-7, D-10 remain open |
+| Resolved decisions | D-1, D-2, D-3, D-5, D-6, D-8, D-9 (see Section 9) |
+| Schema language for v1 | JSON Schema |
+| Evidence Store v1 | PostgreSQL append-only with disjoint credentials + immutable backup |
+| CDDL status | Deferred. Reconsidered only if v2 introduces content-addressed evidence chains. |
+| Date | 2026-05-23 |
+| Owner | SPHUTA / Ojas |
+| Scope | Ojas-only. Strict Path B boundaries: external policy authority, credential lifecycle, and workflow authority remain external. Ojas Runtime still enforces local execution boundaries and returned authority decisions. |
 
 ---
 
@@ -272,55 +279,117 @@ The third leg of the stool. The reason the first two are defensible.
 
 ---
 
-## 9. Open design decisions
+## 9. Design decisions
 
-What is not yet frozen. These need to be decided before any contract or schema work is committed.
+This section records resolved decisions and remaining open items. The seven resolutions below are accepted as freeze candidates for the current document; full freeze requires resolution of D-4, D-7, and D-10 as well.
 
-**D-1. Latency budget for pre-execution event response.** The external policy authority consumes Ojas-emitted destructive-action events. How long does Ojas wait for a response before failing closed? 50ms? 500ms? 2s? Different numbers imply different transport architectures (in-process vs. async stream).
+### 9.1 Resolved decisions
 
-**D-2. Policy-response timeout behavior.** If the external authority doesn't respond within the budget, Ojas fails closed. But what is recorded in audit — `policy-response-timeout` or `implicit-deny`? They have different downstream interpretations.
+**D-1 — Latency budget for pre-execution event response.**
+**Resolution:** 500ms hard ceiling, 200ms target.
+For destructive, irreversible, or production-class actions, Ojas Runtime emits the pre-execution event and waits for the external policy authority's decision. Beyond 500ms the action fails closed. The 200ms target leaves margin for in-process or sidecar deployment of the policy authority without crowding the human reaction window.
 
-**D-3. Destructive-class taxonomy.** Pure DELETE is obviously destructive. UPDATE on `published_invoices` is irreversible in practice. Configuration changes that disable backups are destructive-by-consequence. The rules for classifying borderline cases need to be written.
+**D-2 — Policy-response timeout behavior.**
+**Resolution:** Record `policy-response-timeout` as a typed audit event with `effective-decision: deny-by-timeout`.
+Timeout and explicit deny are recorded as forensically distinct signals. Timeout indicates infrastructure or connectivity problem; explicit deny indicates policy violation. Downstream consumers (dashboards, anomaly detection, on-call alerting) treat them differently. The `effective-decision: deny-by-timeout` field makes clear the action did not proceed without falsely claiming the policy authority issued a denial.
 
-**D-4. Reconciliation truth source per integration.** Postgres has WAL. Cloud APIs have provider audit logs. Filesystem operations have no native audit. Each integration needs a defined source-of-truth contract. Some have none — what does Ojas do for those?
+**D-3 — Destructive-class taxonomy.**
+**Resolution:** Three-axis classification, higher axis wins.
 
-**D-5. Bulk-context window and threshold.** "Bulk-write detection" requires a window size and a count threshold. 100 writes in 60 seconds? 1,000 in 90? Per-tenant or per-actor? The defense exists in principle; the parameters are not set.
+*Axis 1 — Operation type (intrinsic):* `destructive` (DELETE, DROP, TRUNCATE, volume/bucket/file deletion, container/instance termination), `irreversible` (external messages, external publish, payment, ownership transfer), `mutate` (UPDATE, INSERT, file write, configuration change), `read-only` (SELECT, GET, list, describe).
 
-**D-6. Create-after-destroy detection mechanics.** Same entity, same actor, within what window? Recorded as a typed signal or computed at reconciliation? Sliding window or fixed?
+*Axis 2 — Resource class (target):* `production`, `staging`, `sandbox`/`dev`.
 
-**D-7. Tool-provenance verification policy.** Signed by whom? Trust roots managed how? Behavior on unsigned tools — refuse load, allow with elevated logging, allow with reduced capability?
+*Axis 3 — Scope of effect (computed):* `bulk` (affects more than per-entity threshold), `cross-tenant` (crosses tenant boundary), `narrow` (single record or session-scoped).
 
-**D-8. Evidence Store storage architecture.** Object storage with immutability locks? Append-only log on a separate database? Content-addressed with hash chains? This decision affects whether content-addressing-friendly serialization (CBOR with deterministic encoding) is worth its dependency cost.
+Pre-execution audit and fail-closed semantics apply when any of: Axis 1 is `destructive` or `irreversible` (regardless of other axes); Axis 1 is `mutate` AND Axis 2 is `production`; Axis 1 is `mutate` AND Axis 3 is `bulk`; Axis 1 is `mutate` AND Axis 3 is `cross-tenant`.
 
-**D-9. Stream subscriber model.** Push (Ojas notifies subscribers) or pull (subscribers poll)? Single subscriber per stream or fan-out? Backpressure policy?
+**D-5 — Bulk-context window and threshold.**
+**Resolution:** 60-second sliding window; threshold per entity declared in registry; default 100 if not declared; per-actor scoping using `(actor, entity)` count.
+60 seconds is short enough to catch machine-speed bursts (the Replit 4,000-INSERT-in-90-seconds pattern trips), long enough to span legitimate batch operations. Per-entity threshold respects that "100 writes" means different things for `audit_log` vs `users`. Per-actor scoping prevents one busy agent from masking another's burst.
 
-**D-10. Per-product Ojas integration model.** SPHUTA has multiple products that emit signals into Ojas. Common Java/Spring library? Sidecar process? Service-mesh interceptor? The integration choice affects what Ojas can observe.
+**D-6 — Create-after-destroy detection mechanics.**
+**Resolution:** Recent-destroy index keyed by `(tenant, entity, actor, scope-dimension)`; 30-minute window; emit `create-after-destroy-observed` typed signal on the audit stream when an INSERT matches a non-empty recent-destroy entry.
+
+The tuple includes tenant and scope-dimension because multi-tenant cover-up patterns are not detectable on `(entity, actor)` alone. The same actor deleting in tenant T1 and inserting in tenant T2 is not a cover-up; the same actor deleting and inserting within the same tenant and case scope is. 30 minutes is long enough to catch deliberate cover-ups (agent must detect the deletion is visible before constructing synthetic rows), short enough that legitimate delete-then-insert workflows don't constantly trip.
+
+Detection emits a signal. Halt is downstream — Aegis or equivalent consumes the signal and decides response.
+
+**D-8 — Evidence Store storage architecture.**
+**Resolution:** PostgreSQL append-only with disjoint credentials for v1; content-addressed chains deferred to v2; digest fields stored in v1 to ease migration.
+
+*v1 architecture:*
+- PostgreSQL append-only log table.
+- Write credentials disjoint from any agent or runtime identity.
+- DELETE revoked at the database level on the audit tables.
+- UPDATE prevented by trigger on rows older than a few seconds.
+- Daily backup to immutable object storage (S3 Object Lock or equivalent).
+- Retention reduction requires separate ceremony (two-person, out-of-band).
+
+*v1 digest fields (forward-compatibility with v2):*
+- `record_digest` — hash of the canonical serialization of this record.
+- `previous_record_digest` (optional) — link to prior record for migration to hash chains.
+- `payload_digest` (optional) — separate hash of the payload portion.
+
+These fields are stored from v1 even though they are not part of an active chain. They cost almost nothing now and make v2 migration to content-addressed chains a non-breaking change.
+
+*v2 (deferred):* If cryptographic non-repudiation becomes required (regulatory environments, formal audit attestation), activate hash chains using the existing digest fields. At that point, deterministic serialization becomes important and CDDL/CBOR becomes worth reconsidering.
+
+**D-9 — Stream subscriber model.**
+**Resolution:** Split synchronous gate from async observation.
+
+*Synchronous gate path (for pre-execution destructive decisions):*
+Direct low-latency channel — RPC, sidecar, or in-process callback — between Ojas Runtime and the external policy authority. Subject to the D-1 budget. Not dependent on Kafka or any message broker.
+
+*Async observation path (for all audit events including the same destructive events recorded after the synchronous decision):*
+Push-based log-structured stream (Kafka, Pulsar, NATS JetStream, or equivalent). At-least-once delivery. Consumers idempotent on `audit-id`. Multiple subscribers with independent positions. Backpressure absorbed by topic buffering.
+
+This split prevents the 500ms gate from depending on broker availability or partition rebalancing, while still giving observability, replay, fan-out, and reconciliation consumers the stream surface they need.
+
+### 9.2 Open decisions (deferred)
+
+**D-4 — Reconciliation truth source per integration.**
+Different downstream systems offer different audit primitives: PostgreSQL has WAL, cloud APIs have provider audit logs, filesystem operations have no native audit. Each Ojas integration needs a defined source-of-truth contract for reconciliation. Some integrations have no usable native audit — Ojas's behavior for those needs to be specified (likely: emit reconciliation-not-possible warning at integration registration time).
+
+*Deferred to:* per-integration specs.
+
+**D-7 — Tool-provenance verification policy.**
+Tool-load events capture provenance (signing authority, signature, digest, source registry). Open questions: who signs (vendor, deployer, internal CA)? Where do trust roots come from? What is the behavior on unsigned tools (refuse load, allow with elevated logging, allow with reduced capability)?
+
+*Deferred to:* Ojas Runtime / tool registry spec.
+
+**D-10 — Per-product Ojas integration model.**
+SPHUTA has multiple products that emit signals into Ojas. The integration mechanism affects what Ojas can observe: shared Java/Spring library (deep integration, code-level), sidecar process (loose coupling, observable from outside), service-mesh interceptor (zero code change, limited semantics).
+
+*Deferred to:* SPHUTA integration architecture spec.
 
 ---
 
-## 10. Schemas, APIs, and contract artifacts — deferred
+## 10. Schemas, APIs, and contract artifacts — sequenced downstream work
 
-Schema decisions follow this model. They do not precede it.
+The schema language question is **resolved by D-8**: with PostgreSQL append-only as the v1 Evidence Store, JSON Schema is the v1 contract language for all Ojas surfaces. CDDL/CBOR is deferred and only reconsidered if v2 adopts content-addressed evidence chains.
 
-When this model is reviewed and accepted, the following are the natural next artifacts, in this order:
+This document is the parent. The following artifacts are produced downstream, in this order:
 
-1. **Ojas Runtime contract surface** — what messages does Runtime emit, what does it consume, what shape does the pre-execution event take? Defined as a message catalog first, schema-language-neutral.
-2. **Ojas Data contract surface** — refinement of the current v0.2 work, applying the v0.3 deltas (pre-execution audit binding, bulk-context block, create-after-destroy signal, closed preflight enum, discriminated audit records, sanitized feedback templates, parameter-only query values).
-3. **Ojas Evidence Store contract surface** — storage format, retrieval API, reconciliation interface.
-4. **Schema language decision** — CDDL/CBOR vs JSON Schema vs Avro vs Protobuf, evaluated against the three contract surfaces and the open decision D-8 (Evidence Store architecture).
-5. **Per-surface schema artifacts** — written in the chosen language.
+1. **Ojas Runtime message catalog** — what messages does Runtime emit, what does it consume, what shape does the pre-execution event take, what does the tool-load event carry. Defined as a message catalog first; schema-language-neutral at that stage. This is the next artifact.
 
-Step 4 is intentionally late. Choosing a schema language before knowing what needs to be expressed and how Evidence Store will store records is what produced the prior drift. This document does not litigate that choice.
+2. **Ojas Data v0.3 message catalog** — refinement of the prior v0.2 CDDL work, applying the seven deltas (pre-execution audit binding, bulk-context block, create-after-destroy signal, closed preflight enum, discriminated audit records, sanitized feedback templates, parameter-only query values). The catalog form is schema-language-neutral; the existing v0.2 contributes the field discipline, not the encoding.
 
-The CDDL work on Ojas Data v0.2 is not lost — it serves as the message catalog input for step 2. Its contribution is the discipline of identifying every field that crosses every boundary, not the specific encoding.
+3. **Ojas Evidence Store contract surface** — Postgres table schema (audit tables, retention policy, digest fields per D-8), retrieval API, reconciliation interface, stream emission contract per D-9.
+
+4. **JSON Schema artifacts** — written for all three surfaces above, generated for Java (Spring Boot), Python (LLM clients), TypeScript (consumers).
+
+Schema decisions live in step 4, not step 1. The CDDL v0.2 work is preserved as message-catalog input for step 2; its encoding choice is deferred.
+
+If v2 introduces content-addressed evidence chains (D-8 future direction), CDDL/CBOR may be reconsidered at that point — the digest fields in v1 are forward-compatible.
 
 ---
 
 ## Closing principle
 
-This document is the design baseline. It is not freeze-ready. It is a review candidate.
+This document is now the design baseline and freeze candidate. Seven of the ten open design decisions are resolved (D-1, D-2, D-3, D-5, D-6, D-8, D-9). Three remain explicitly deferred (D-4, D-7, D-10) to integration-time and spec-time decisions.
 
-Before any product team builds against it, the open design decisions in section 9 need to be resolved, and the document needs an explicit freeze pass with you as the decision authority. Until then, this is the working architecture — strong enough to design against, not strong enough to ship against.
+Full freeze of this document is held pending resolution of D-4, D-7, and D-10. Until then it is a freeze candidate — strong enough to design the next layer of artifacts against (Ojas Runtime message catalog, Ojas Data v0.3 message catalog, Ojas Evidence Store contract surface), not yet strong enough to ship implementation against.
 
 The core anchor remains the only sentence that should never change:
 
