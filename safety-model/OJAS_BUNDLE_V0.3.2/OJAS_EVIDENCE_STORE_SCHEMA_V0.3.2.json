@@ -1,0 +1,424 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.ojas.dev/ojas/evidence-store/v0.3.2/schema.json",
+  "title": "Ojas Evidence Store v0.3.2",
+  "description": "Corrected per catalog v0.3.2 §5, §6, §7, §8.3. v0.3.1 D-F3 strict envelope wrapping: evidence-record is the canonical wire shape for all audit records. Payload types discriminated by record-type; payload structures live in bundle schema (data-execute path types, credential-boundary records) or runtime-data schema (runtime-emitted record types). audit-id now uses canonical opaque type via cross-schema $ref (v0.3.1 D-F1). v0.3.2 O-5: reconciliation-batch-summary adds compared-records-digest and gap-records-digest as optional.",
+  "$defs": {
+    "identifier": {
+      "$ref": "https://schemas.ojas.dev/ojas/data-runtime-bundle/v0.3.2/schema.json#/$defs/identifier"
+    },
+    "audit-id": {
+      "$ref": "https://schemas.ojas.dev/ojas/data-runtime-bundle/v0.3.2/schema.json#/$defs/audit-id"
+    },
+    "correlation-id": {
+      "$ref": "https://schemas.ojas.dev/ojas/data-runtime-bundle/v0.3.2/schema.json#/$defs/correlation-id"
+    },
+    "tenant-id": {
+      "$ref": "https://schemas.ojas.dev/ojas/data-runtime-bundle/v0.3.2/schema.json#/$defs/tenant-id"
+    },
+    "digest": {
+      "$ref": "https://schemas.ojas.dev/ojas/data-runtime-bundle/v0.3.2/schema.json#/$defs/digest"
+    },
+    "external-ref": {
+      "$ref": "https://schemas.ojas.dev/ojas/data-runtime-bundle/v0.3.2/schema.json#/$defs/external-ref"
+    },
+    "timestamp-ms": {
+      "$ref": "https://schemas.ojas.dev/ojas/data-runtime-bundle/v0.3.2/schema.json#/$defs/timestamp-ms"
+    },
+    "bounded-string": {
+      "$ref": "https://schemas.ojas.dev/ojas/data-runtime-bundle/v0.3.2/schema.json#/$defs/bounded-string"
+    },
+    "actor-context": {
+      "$ref": "https://schemas.ojas.dev/ojas/data-runtime-bundle/v0.3.2/schema.json#/$defs/actor-context"
+    },
+    "emitter-code": {
+      "$ref": "https://schemas.ojas.dev/ojas/data-runtime-bundle/v0.3.2/schema.json#/$defs/emitter-code"
+    },
+    "record-type-code": {
+      "$ref": "https://schemas.ojas.dev/ojas/data-runtime-bundle/v0.3.2/schema.json#/$defs/record-type-code"
+    },
+    "evidence-record": {
+      "type": "object",
+      "description": "Catalog §5.1. v0.3.1 D-F3: canonical wire shape for all audit records. payload is discriminated by record-type and references the appropriate $defs in bundle or runtime-data schema. v0.3.1 D-F1: audit-id is the opaque operational type, not registry identifier. v1 behavior: record-digest always populated; previous-record-digest optional but enables hash-chain verification (v2-forward).",
+      "required": [
+        "audit-id", "record-type", "emitter", "correlation-id",
+        "tenant-id", "record-digest", "created-at-ms", "payload"
+      ],
+      "properties": {
+        "audit-id": { "$ref": "#/$defs/audit-id" },
+        "record-type": { "$ref": "#/$defs/record-type-code" },
+        "emitter": { "$ref": "#/$defs/emitter-code" },
+        "correlation-id": { "$ref": "#/$defs/correlation-id" },
+        "tenant-id": { "$ref": "#/$defs/tenant-id" },
+        "record-digest": { "$ref": "#/$defs/digest" },
+        "previous-record-digest": { "$ref": "#/$defs/digest" },
+        "payload-digest": { "$ref": "#/$defs/digest" },
+        "created-at-ms": { "$ref": "#/$defs/timestamp-ms" },
+        "payload": {
+          "type": "object",
+          "description": "Payload structure determined by record-type. See allOf conditionals below for the discriminated mapping per catalog §5.3."
+        }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "description": "record-type=data-operation-audit -> payload conforms to data-operation-audit ($defs in runtime-data schema). Emitter must be ojas-data per §9.3.",
+          "if": {
+            "properties": { "record-type": { "const": "data-operation-audit" } },
+            "required": ["record-type"]
+          },
+          "then": {
+            "properties": {
+              "emitter": { "const": "ojas-data" },
+              "payload": {
+                "$ref": "https://schemas.ojas.dev/ojas/runtime-data/v0.3.2/schema.json#/$defs/data-operation-audit"
+              }
+            }
+          }
+        },
+        {
+          "description": "record-type=field-level-audit -> payload conforms to field-level-audit-record. Emitter must be ojas-runtime-data per §9.3.",
+          "if": {
+            "properties": { "record-type": { "const": "field-level-audit" } },
+            "required": ["record-type"]
+          },
+          "then": {
+            "properties": {
+              "emitter": { "const": "ojas-runtime-data" },
+              "payload": {
+                "$ref": "https://schemas.ojas.dev/ojas/runtime-data/v0.3.2/schema.json#/$defs/field-level-audit-record"
+              }
+            }
+          }
+        },
+        {
+          "description": "record-type=context-binding -> payload conforms to context-binding-record. Emitter ojas-runtime-data.",
+          "if": {
+            "properties": { "record-type": { "const": "context-binding" } },
+            "required": ["record-type"]
+          },
+          "then": {
+            "properties": {
+              "emitter": { "const": "ojas-runtime-data" },
+              "payload": {
+                "$ref": "https://schemas.ojas.dev/ojas/runtime-data/v0.3.2/schema.json#/$defs/context-binding-record"
+              }
+            }
+          }
+        },
+        {
+          "description": "record-type=credential-handle-use -> payload conforms to credential-handle-use-record. Emitter ojas-runtime-data.",
+          "if": {
+            "properties": { "record-type": { "const": "credential-handle-use" } },
+            "required": ["record-type"]
+          },
+          "then": {
+            "properties": {
+              "emitter": { "const": "ojas-runtime-data" },
+              "payload": {
+                "$ref": "https://schemas.ojas.dev/ojas/runtime-data/v0.3.2/schema.json#/$defs/credential-handle-use-record"
+              }
+            }
+          }
+        },
+        {
+          "description": "record-type=pre-execution-audit-binding -> payload conforms to pre-execution-audit-binding. Emitter ojas-runtime-data.",
+          "if": {
+            "properties": { "record-type": { "const": "pre-execution-audit-binding" } },
+            "required": ["record-type"]
+          },
+          "then": {
+            "properties": {
+              "emitter": { "const": "ojas-runtime-data" },
+              "payload": {
+                "$ref": "https://schemas.ojas.dev/ojas/runtime-data/v0.3.2/schema.json#/$defs/pre-execution-audit-binding"
+              }
+            }
+          }
+        },
+        {
+          "description": "record-type=sanitized-feedback-routing -> payload conforms to sanitized-feedback-routing-record. Emitter ojas-runtime-data.",
+          "if": {
+            "properties": { "record-type": { "const": "sanitized-feedback-routing" } },
+            "required": ["record-type"]
+          },
+          "then": {
+            "properties": {
+              "emitter": { "const": "ojas-runtime-data" },
+              "payload": {
+                "$ref": "https://schemas.ojas.dev/ojas/runtime-data/v0.3.2/schema.json#/$defs/sanitized-feedback-routing-record"
+              }
+            }
+          }
+        },
+        {
+          "description": "record-type=no-progress-halt -> payload conforms to no-progress-halt-record. Emitter ojas-runtime-data.",
+          "if": {
+            "properties": { "record-type": { "const": "no-progress-halt" } },
+            "required": ["record-type"]
+          },
+          "then": {
+            "properties": {
+              "emitter": { "const": "ojas-runtime-data" },
+              "payload": {
+                "$ref": "https://schemas.ojas.dev/ojas/runtime-data/v0.3.2/schema.json#/$defs/no-progress-halt-record"
+              }
+            }
+          }
+        },
+        {
+          "description": "record-type=reconciliation-hook -> payload conforms to reconciliation-hook-emit. Emitter ojas-runtime-data.",
+          "if": {
+            "properties": { "record-type": { "const": "reconciliation-hook" } },
+            "required": ["record-type"]
+          },
+          "then": {
+            "properties": {
+              "emitter": { "const": "ojas-runtime-data" },
+              "payload": {
+                "$ref": "https://schemas.ojas.dev/ojas/runtime-data/v0.3.2/schema.json#/$defs/reconciliation-hook-emit"
+              }
+            }
+          }
+        },
+        {
+          "description": "record-type=mutation-preflight-orchestration -> payload conforms to mutation-preflight-orchestration-record. Emitter ojas-runtime-data.",
+          "if": {
+            "properties": { "record-type": { "const": "mutation-preflight-orchestration" } },
+            "required": ["record-type"]
+          },
+          "then": {
+            "properties": {
+              "emitter": { "const": "ojas-runtime-data" },
+              "payload": {
+                "$ref": "https://schemas.ojas.dev/ojas/runtime-data/v0.3.2/schema.json#/$defs/mutation-preflight-orchestration-record"
+              }
+            }
+          }
+        },
+        {
+          "description": "record-type=credential-handle-request -> payload conforms to credential-handle-request (catalog v0.3.2 O-1: entity and operation required). Emitter ojas-credential-boundary-adapter.",
+          "if": {
+            "properties": { "record-type": { "const": "credential-handle-request" } },
+            "required": ["record-type"]
+          },
+          "then": {
+            "properties": {
+              "emitter": { "const": "ojas-credential-boundary-adapter" },
+              "payload": {
+                "$ref": "https://schemas.ojas.dev/ojas/data-runtime-bundle/v0.3.2/schema.json#/$defs/credential-handle-request"
+              }
+            }
+          }
+        },
+        {
+          "description": "record-type=credential-selection -> payload conforms to credential-selection. Emitter ojas-credential-boundary-adapter.",
+          "if": {
+            "properties": { "record-type": { "const": "credential-selection" } },
+            "required": ["record-type"]
+          },
+          "then": {
+            "properties": {
+              "emitter": { "const": "ojas-credential-boundary-adapter" },
+              "payload": {
+                "$ref": "https://schemas.ojas.dev/ojas/data-runtime-bundle/v0.3.2/schema.json#/$defs/credential-selection"
+              }
+            }
+          }
+        },
+        {
+          "description": "record-type=credential-revoke-notification -> payload conforms to credential-revoke-notification. Emitter ojas-credential-boundary-adapter.",
+          "if": {
+            "properties": { "record-type": { "const": "credential-revoke-notification" } },
+            "required": ["record-type"]
+          },
+          "then": {
+            "properties": {
+              "emitter": { "const": "ojas-credential-boundary-adapter" },
+              "payload": {
+                "$ref": "https://schemas.ojas.dev/ojas/data-runtime-bundle/v0.3.2/schema.json#/$defs/credential-revoke-notification"
+              }
+            }
+          }
+        },
+        {
+          "description": "record-type=policy-response-timeout -> payload conforms to policy-response-timeout (runtime-data). Emitter ojas-runtime-data.",
+          "if": {
+            "properties": { "record-type": { "const": "policy-response-timeout" } },
+            "required": ["record-type"]
+          },
+          "then": {
+            "properties": {
+              "emitter": { "const": "ojas-runtime-data" },
+              "payload": {
+                "$ref": "https://schemas.ojas.dev/ojas/runtime-data/v0.3.2/schema.json#/$defs/policy-response-timeout"
+              }
+            }
+          }
+        },
+        {
+          "description": "record-type=bulk-context-observed -> payload conforms to bulk-context-observed (this schema). Emitter ojas-runtime-data.",
+          "if": {
+            "properties": { "record-type": { "const": "bulk-context-observed" } },
+            "required": ["record-type"]
+          },
+          "then": {
+            "properties": {
+              "emitter": { "const": "ojas-runtime-data" },
+              "payload": { "$ref": "#/$defs/bulk-context-observed" }
+            }
+          }
+        },
+        {
+          "description": "record-type=create-after-destroy-observed -> payload conforms to create-after-destroy-observed (this schema). Emitter ojas-runtime-data.",
+          "if": {
+            "properties": { "record-type": { "const": "create-after-destroy-observed" } },
+            "required": ["record-type"]
+          },
+          "then": {
+            "properties": {
+              "emitter": { "const": "ojas-runtime-data" },
+              "payload": { "$ref": "#/$defs/create-after-destroy-observed" }
+            }
+          }
+        }
+      ]
+    },
+    "bulk-context-observed": {
+      "type": "object",
+      "description": "Catalog §6.1. D-5: 60s sliding window, per (actor, entity), default threshold 100. Typed signal, not standalone protocol message — appears as evidence-record.payload when record-type=bulk-context-observed.",
+      "required": [
+        "actor", "entity", "tenant-id", "window-seconds",
+        "operation", "event-count-in-window", "threshold", "observed-at-ms"
+      ],
+      "properties": {
+        "actor": { "$ref": "#/$defs/actor-context" },
+        "entity": { "$ref": "#/$defs/identifier" },
+        "tenant-id": { "$ref": "#/$defs/tenant-id" },
+        "window-seconds": { "type": "integer", "minimum": 1 },
+        "operation": {
+          "$ref": "https://schemas.ojas.dev/ojas/data-runtime-bundle/v0.3.2/schema.json#/$defs/data-operation-code"
+        },
+        "event-count-in-window": { "type": "integer", "minimum": 1 },
+        "threshold": { "type": "integer", "minimum": 1 },
+        "observed-at-ms": { "$ref": "#/$defs/timestamp-ms" }
+      },
+      "additionalProperties": false
+    },
+    "pattern-confidence-class-code": {
+      "description": "Catalog §6.2 with v0.3.2 O-3 resolution: all three classes retained. scope-match preserved as lower-confidence signal.",
+      "enum": ["exact-match", "scope-match", "actor-match"]
+    },
+    "create-after-destroy-observed": {
+      "type": "object",
+      "description": "Catalog §6.2. D-6: recent-destroy index keyed by (tenant, entity, actor, scope-dimension); 30-min window. Typed signal, not standalone protocol message — appears as evidence-record.payload when record-type=create-after-destroy-observed.",
+      "required": [
+        "actor", "entity", "tenant-id", "scope-dimension",
+        "destroy-audit-ref", "destroy-at-ms", "create-audit-ref", "create-at-ms",
+        "window-seconds", "pattern-confidence-class"
+      ],
+      "properties": {
+        "actor": { "$ref": "#/$defs/actor-context" },
+        "entity": { "$ref": "#/$defs/identifier" },
+        "tenant-id": { "$ref": "#/$defs/tenant-id" },
+        "scope-dimension": {
+          "type": "object",
+          "patternProperties": {
+            "^[a-z][a-z0-9_]*$": { "$ref": "#/$defs/bounded-string" }
+          },
+          "additionalProperties": false
+        },
+        "destroy-audit-ref": { "$ref": "#/$defs/external-ref" },
+        "destroy-at-ms": { "$ref": "#/$defs/timestamp-ms" },
+        "create-audit-ref": { "$ref": "#/$defs/external-ref" },
+        "create-at-ms": { "$ref": "#/$defs/timestamp-ms" },
+        "window-seconds": {
+          "type": "integer",
+          "const": 1800,
+          "description": "D-6: 30-minute window (1800 seconds)."
+        },
+        "pattern-confidence-class": { "$ref": "#/$defs/pattern-confidence-class-code" }
+      },
+      "additionalProperties": false
+    },
+    "reconciliation-gap-observed": {
+      "type": "object",
+      "description": "Catalog §7.1. Emitted when reconciliation finds an Ojas-Evidence-Store-only or downstream-only record. Typed signal; envelope-wrapped via evidence-record (currently not in record-type-code enum — SCHEMA-REVIEW: catalog §5.3 may need to add this code, or §7.1 is intended as stream-only).",
+      "required": ["audit-id", "truth-source", "gap-side", "observed-at-ms"],
+      "properties": {
+        "audit-id": { "$ref": "#/$defs/audit-id" },
+        "truth-source": {
+          "$ref": "https://schemas.ojas.dev/ojas/runtime-data/v0.3.2/schema.json#/$defs/truth-source-code"
+        },
+        "gap-side": { "enum": ["ojas-only", "downstream-only"] },
+        "observed-at-ms": { "$ref": "#/$defs/timestamp-ms" },
+        "ojas-audit-ref": { "$ref": "#/$defs/external-ref" },
+        "downstream-ref-hint": { "$ref": "#/$defs/external-ref" }
+      },
+      "additionalProperties": false
+    },
+    "reconciliation-batch-summary": {
+      "type": "object",
+      "description": "Catalog §7.2 with v0.3.2 O-5 resolution. Two new optional digests: compared-records-digest (digest of compared set) and gap-records-digest (digest of subset where gaps/divergences found). Separate, not merged.",
+      "required": [
+        "truth-source", "window-start-ms", "window-end-ms",
+        "ojas-records-compared", "downstream-records-compared",
+        "gaps-found", "divergences-found"
+      ],
+      "properties": {
+        "truth-source": {
+          "$ref": "https://schemas.ojas.dev/ojas/runtime-data/v0.3.2/schema.json#/$defs/truth-source-code"
+        },
+        "window-start-ms": { "$ref": "#/$defs/timestamp-ms" },
+        "window-end-ms": { "$ref": "#/$defs/timestamp-ms" },
+        "ojas-records-compared": { "type": "integer", "minimum": 0 },
+        "downstream-records-compared": { "type": "integer", "minimum": 0 },
+        "gaps-found": { "type": "integer", "minimum": 0 },
+        "divergences-found": { "type": "integer", "minimum": 0 },
+        "compared-records-digest": {
+          "$ref": "#/$defs/digest",
+          "description": "v0.3.2 O-5: digest of canonical serialization of the compared record set. Enables forensic re-verification of comparison coverage."
+        },
+        "gap-records-digest": {
+          "$ref": "#/$defs/digest",
+          "description": "v0.3.2 O-5: digest of canonical serialization of the subset where gaps/divergences were found. Separate from compared-records-digest for independent forensic re-verification."
+        }
+      },
+      "additionalProperties": false
+    },
+    "stream-record": {
+      "type": "object",
+      "description": "Catalog §8.3 with v0.3.2 O-4 resolution. Async observation stream envelope. partition-key is bounded string; deployment configuration selects strategy (tenant-id default, tenant+entity, tenant+entity+actor). Schema does not enforce strategy choice; runtime config validates.",
+      "required": [
+        "stream-sequence", "partition-key", "record-type",
+        "record-digest", "evidence-record-ref", "payload", "emitted-at-ms"
+      ],
+      "properties": {
+        "stream-sequence": { "type": "integer", "minimum": 0 },
+        "partition-key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "description": "v0.3.2 O-4: computed per deployment-configured partition strategy. Three permitted strategies: tenant-id (default), tenant+entity, tenant+entity+actor. Strategy choice is deployment config, not schema-enforceable."
+        },
+        "record-type": { "$ref": "#/$defs/record-type-code" },
+        "record-digest": { "$ref": "#/$defs/digest" },
+        "evidence-record-ref": { "$ref": "#/$defs/external-ref" },
+        "payload": {
+          "type": "object",
+          "description": "Same payload as Evidence Store record. Discrimination identical to evidence-record.payload via record-type."
+        },
+        "emitted-at-ms": { "$ref": "#/$defs/timestamp-ms" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "oneOf": [
+    { "$ref": "#/$defs/evidence-record" },
+    { "$ref": "#/$defs/bulk-context-observed" },
+    { "$ref": "#/$defs/create-after-destroy-observed" },
+    { "$ref": "#/$defs/reconciliation-gap-observed" },
+    { "$ref": "#/$defs/reconciliation-batch-summary" },
+    { "$ref": "#/$defs/stream-record" }
+  ]
+}
